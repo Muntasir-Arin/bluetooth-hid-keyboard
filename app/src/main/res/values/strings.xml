@@ -1,0 +1,7 @@
+<resources>
+    <string name="app_name">Nubloo Keyboard</string>
+    <string name="service_channel_name">Nubloo Keyboard Service</string>
+    <string name="service_notification_title">Nubloo Keyboard active</string>
+    <string name="service_notification_disconnected">No active host</string>
+    <string name="service_notification_connected">Connected to %1$s</string>
+</resources>
