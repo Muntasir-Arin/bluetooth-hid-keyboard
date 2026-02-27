@@ -67,6 +67,23 @@ class HidReportEncoder(
         )
     }
 
+    fun keyboardModifierStateReport(modifierMask: Int): EncodedReport {
+        return EncodedReport(
+            reportId = REPORT_ID_KEYBOARD,
+            payload = keyboardReport(modifierMask = modifierMask, usage = 0),
+        )
+    }
+
+    fun keyboardShortcutReports(
+        usage: Int,
+        modifierMask: Int,
+    ): List<EncodedReport> {
+        return listOf(
+            EncodedReport(REPORT_ID_KEYBOARD, keyboardReport(modifierMask = modifierMask, usage = usage)),
+            EncodedReport(REPORT_ID_KEYBOARD, keyboardReport(modifierMask = 0, usage = 0)),
+        )
+    }
+
     private fun encodeText(text: String, baseMask: Int): EncodeResult {
         val reports = mutableListOf<EncodedReport>()
         var unmapped = 0

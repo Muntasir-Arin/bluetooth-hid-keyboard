@@ -202,7 +202,13 @@ class BluetoothHidController(
 
     fun isBluetoothAvailable(): Boolean = bluetoothAdapter != null
 
-    fun isBluetoothEnabled(): Boolean = bluetoothAdapter?.isEnabled == true
+    @SuppressLint("MissingPermission")
+    fun isBluetoothEnabled(): Boolean {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S && !hasConnectPermission()) {
+            return false
+        }
+        return runCatching { bluetoothAdapter?.isEnabled == true }.getOrDefault(false)
+    }
 
     fun isHidDeviceSupported(): Boolean = Build.VERSION.SDK_INT >= Build.VERSION_CODES.P
 
@@ -334,7 +340,7 @@ class BluetoothHidController(
 
         val sdp = BluetoothHidDeviceAppSdpSettings(
             "BT Keyboard",
-            "Bluetooth HID Keyboard + Mouse",
+            "Bluetooth HID Keyboard + Touchpad",
             "BT Keyboard",
             0xC0.toByte(),
             HidReportEncoder.HID_DESCRIPTOR,
@@ -524,6 +530,24 @@ class BluetoothHidController(
         return sendReportsNonState(reports)
     }
 
+    fun sendHorizontalScroll(steps: Int): Result<Unit> {
+        if (steps == 0) {
+            return Result.success(Unit)
+        }
+        return sendMouseScrollWithTemporaryModifiers(
+            steps = steps,
+            requiredModifiers = setOf(ModifierKey.SHIFT),
+        )
+    }
+
+    fun sendZoom(zoomIn: Boolean): Result<Unit> {
+        val wheelSteps = if (zoomIn) 1 else -1
+        return sendMouseScrollWithTemporaryModifiers(
+            steps = wheelSteps,
+            requiredModifiers = setOf(ModifierKey.CTRL),
+        )
+    }
+
     fun setMouseButton(button: MouseButton, pressed: Boolean): Result<Unit> {
         val current = _pressedMouseButtons.value
         if ((button in current) == pressed) {
@@ -550,6 +574,44 @@ class BluetoothHidController(
         }
         setMouseButton(button, pressed = true).getOrElse { return Result.failure(it) }
         return setMouseButton(button, pressed = false)
+    }
+
+    fun doubleClickMouseButton(button: MouseButton): Result<Unit> {
+        clickMouseButton(button).getOrElse { return Result.failure(it) }
+        return clickMouseButton(button)
+    }
+
+    fun shortcutTaskView(): Result<Unit> {
+        return sendKeyboardShortcut(
+            usage = KEY_USAGE_TAB,
+            modifiers = setOf(ModifierKey.META),
+        )
+    }
+
+    fun shortcutShowDesktop(): Result<Unit> {
+        return sendKeyboardShortcut(
+            usage = KEY_USAGE_D,
+            modifiers = setOf(ModifierKey.META),
+        )
+    }
+
+    fun shortcutSwitchApp(next: Boolean): Result<Unit> {
+        val modifiers = if (next) {
+            setOf(ModifierKey.ALT)
+        } else {
+            setOf(ModifierKey.ALT, ModifierKey.SHIFT)
+        }
+        return sendKeyboardShortcut(
+            usage = KEY_USAGE_TAB,
+            modifiers = modifiers,
+        )
+    }
+
+    fun shortcutLookup(): Result<Unit> {
+        return sendKeyboardShortcut(
+            usage = KEY_USAGE_F,
+            modifiers = setOf(ModifierKey.CTRL),
+        )
     }
 
     fun acknowledgeHidDescriptorMigration() {
@@ -673,7 +735,7 @@ class BluetoothHidController(
         _discoveredDevices.value = (current + host).sortedBy { it.name.lowercase() }
     }
 
-    private fun ensureProfileProxy(timeoutSeconds: Long = 3): BluetoothHidDevice? {
+    private fun ensureProfileProxy(timeoutSeconds: Long = 8): BluetoothHidDevice? {
         if (hidDevice != null) {
             return hidDevice
         }
@@ -733,11 +795,15 @@ class BluetoothHidController(
             return null
         }
 
-        latch.await(timeoutSeconds, TimeUnit.SECONDS)
+        val callbackArrived = latch.await(timeoutSeconds, TimeUnit.SECONDS)
         if (proxy == null) {
             lastProfileProxyErrorCode = ErrorCode.PROFILE_UNAVAILABLE
             lastProfileProxyErrorMessage =
-                "Unable to acquire HID profile proxy. If this persists, your device likely does not support HID Device mode."
+                if (!callbackArrived) {
+                    "Timed out waiting for HID profile service. Retry once after toggling Bluetooth."
+                } else {
+                    "Unable to acquire HID profile proxy. If this persists, your device likely does not support HID Device mode."
+                }
         }
         return proxy
     }
@@ -834,6 +900,45 @@ class BluetoothHidController(
         }
     }
 
+    private fun sendMouseScrollWithTemporaryModifiers(
+        steps: Int,
+        requiredModifiers: Set<ModifierKey>,
+    ): Result<Unit> {
+        if (steps == 0) {
+            return Result.success(Unit)
+        }
+        val baseModifiers = _activeModifiers.value
+        val mergedModifiers = (baseModifiers + requiredModifiers).toSet()
+        val baseMask = encoder.modifierMask(baseModifiers)
+        val mergedMask = encoder.modifierMask(mergedModifiers)
+
+        val reports = mutableListOf<HidReportEncoder.EncodedReport>()
+        if (mergedMask != baseMask) {
+            reports += encoder.keyboardModifierStateReport(mergedMask)
+        }
+        reports += encoder.encodeMouseScroll(
+            wheel = steps,
+            buttonsMask = mouseButtonsMask(),
+        )
+        if (mergedMask != baseMask) {
+            reports += encoder.keyboardModifierStateReport(baseMask)
+        }
+        return sendReportsNonState(reports)
+    }
+
+    private fun sendKeyboardShortcut(
+        usage: Int,
+        modifiers: Set<ModifierKey>,
+    ): Result<Unit> {
+        val mask = encoder.modifierMask(modifiers)
+        return sendReportsNonState(
+            encoder.keyboardShortcutReports(
+                usage = usage,
+                modifierMask = mask,
+            ),
+        )
+    }
+
     private fun errorResult(code: ErrorCode, message: String): Result<Unit> {
         logger.log("Error($code): $message")
         _state.value = ConnectionState.Error(code = code, message = message)
@@ -893,5 +998,8 @@ class BluetoothHidController(
         const val CURRENT_HID_DESCRIPTOR_VERSION = 2
         const val REPAIR_REQUIRED_MESSAGE =
             "Bluetooth HID descriptor changed in this version. Forget this phone from your host and pair again before connecting."
+        private const val KEY_USAGE_TAB = 0x2B
+        private const val KEY_USAGE_D = 0x07
+        private const val KEY_USAGE_F = 0x09
     }
 }

@@ -116,7 +116,7 @@ fun DevicesScreen(
                             color = MaterialTheme.colorScheme.primary,
                         )
                         Text(
-                            "The HID descriptor now includes mouse reports. Forget this phone from your host and pair again.",
+                            "The HID descriptor now includes touchpad reports. Forget this phone from your host and pair again.",
                             style = MaterialTheme.typography.bodySmall,
                         )
                         FlowRow(

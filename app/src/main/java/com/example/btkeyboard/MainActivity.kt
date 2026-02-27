@@ -273,8 +273,17 @@ class MainActivity : ComponentActivity() {
                                 onMove = { dx, dy ->
                                     trackpadViewModel.movePointer(dx, dy, settings.pointerSensitivity)
                                 },
-                                onScrollSteps = trackpadViewModel::scrollBySteps,
+                                onVerticalScrollSteps = trackpadViewModel::scrollBySteps,
+                                onHorizontalScrollSteps = trackpadViewModel::scrollHorizontallyBySteps,
                                 onTap = trackpadViewModel::tapToClick,
+                                onDoubleTap = trackpadViewModel::doubleTapToDoubleClick,
+                                onTwoFingerTap = trackpadViewModel::twoFingerTapRightClick,
+                                onPinchZoom = trackpadViewModel::pinchZoom,
+                                onThreeFingerSwipeUp = trackpadViewModel::threeFingerSwipeUp,
+                                onThreeFingerSwipeDown = trackpadViewModel::threeFingerSwipeDown,
+                                onThreeFingerSwipeLeft = trackpadViewModel::threeFingerSwipeLeft,
+                                onThreeFingerSwipeRight = trackpadViewModel::threeFingerSwipeRight,
+                                onThreeFingerTap = trackpadViewModel::threeFingerTapLookup,
                                 onButtonPressed = trackpadViewModel::setButtonPressed,
                             )
                         }
@@ -458,7 +467,7 @@ private fun RepairRequiredDialog(
         onDismissRequest = onDismiss,
         title = { Text("Re-pair required") },
         text = {
-            Text("Mouse support was added. Forget this phone from the host Bluetooth list, then pair again.")
+            Text("Touchpad support was added. Forget this phone from the host Bluetooth list, then pair again.")
         },
         dismissButton = {
             TextButton(onClick = onOpenBluetoothSettings) {

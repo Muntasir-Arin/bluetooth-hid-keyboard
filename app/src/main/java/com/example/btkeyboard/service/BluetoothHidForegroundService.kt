@@ -29,11 +29,23 @@ class BluetoothHidForegroundService : Service() {
 
     override fun onCreate() {
         super.onCreate()
-        createNotificationChannel()
-        startForeground(NOTIFICATION_ID, buildNotification(getString(R.string.service_notification_disconnected)))
+        val startupOk = runCatching {
+            createNotificationChannel()
+            startForeground(NOTIFICATION_ID, buildNotification(getString(R.string.service_notification_disconnected)))
+        }.onFailure {
+            app.diagnosticsLogger.log("Service startup failed: ${it.message}")
+        }.isSuccess
+        if (!startupOk) {
+            stopSelf()
+            return
+        }
 
-        controller.registerApp()
-        controller.attemptAutoReconnect()
+        runCatching {
+            controller.registerApp()
+            controller.attemptAutoReconnect()
+        }.onFailure {
+            app.diagnosticsLogger.log("HID initialization failed: ${it.message}")
+        }
 
         notificationJob = serviceScope.launch {
             controller.state.collectLatest { state ->

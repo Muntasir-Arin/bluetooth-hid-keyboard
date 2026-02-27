@@ -35,6 +35,13 @@ class TrackpadViewModel(
             ?.let { _lastError.value = it }
     }
 
+    fun scrollHorizontallyBySteps(steps: Int) {
+        controller.sendHorizontalScroll(steps)
+            .exceptionOrNull()
+            ?.message
+            ?.let { _lastError.value = it }
+    }
+
     fun setButtonPressed(
         button: MouseButton,
         pressed: Boolean,
@@ -47,6 +54,62 @@ class TrackpadViewModel(
 
     fun tapToClick() {
         controller.clickMouseButton(MouseButton.LEFT)
+            .exceptionOrNull()
+            ?.message
+            ?.let { _lastError.value = it }
+    }
+
+    fun doubleTapToDoubleClick() {
+        controller.doubleClickMouseButton(MouseButton.LEFT)
+            .exceptionOrNull()
+            ?.message
+            ?.let { _lastError.value = it }
+    }
+
+    fun twoFingerTapRightClick() {
+        controller.clickMouseButton(MouseButton.RIGHT)
+            .exceptionOrNull()
+            ?.message
+            ?.let { _lastError.value = it }
+    }
+
+    fun pinchZoom(zoomIn: Boolean) {
+        controller.sendZoom(zoomIn)
+            .exceptionOrNull()
+            ?.message
+            ?.let { _lastError.value = it }
+    }
+
+    fun threeFingerSwipeUp() {
+        controller.shortcutTaskView()
+            .exceptionOrNull()
+            ?.message
+            ?.let { _lastError.value = it }
+    }
+
+    fun threeFingerSwipeDown() {
+        controller.shortcutShowDesktop()
+            .exceptionOrNull()
+            ?.message
+            ?.let { _lastError.value = it }
+    }
+
+    fun threeFingerSwipeLeft() {
+        controller.shortcutSwitchApp(next = false)
+            .exceptionOrNull()
+            ?.message
+            ?.let { _lastError.value = it }
+    }
+
+    fun threeFingerSwipeRight() {
+        controller.shortcutSwitchApp(next = true)
+            .exceptionOrNull()
+            ?.message
+            ?.let { _lastError.value = it }
+    }
+
+    fun threeFingerTapLookup() {
+        controller.shortcutLookup()
             .exceptionOrNull()
             ?.message
             ?.let { _lastError.value = it }

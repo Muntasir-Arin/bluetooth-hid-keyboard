@@ -14,6 +14,6 @@ enum class AppDestination(
 ) {
     Devices(route = "devices", title = "Devices", icon = Icons.Default.Devices),
     Keyboard(route = "keyboard", title = "Keyboard", icon = Icons.Default.Keyboard),
-    Trackpad(route = "trackpad", title = "Trackpad", icon = Icons.Default.TouchApp),
+    Trackpad(route = "trackpad", title = "Touchpad", icon = Icons.Default.TouchApp),
     Settings(route = "settings", title = "Settings", icon = Icons.Default.Settings),
 }
