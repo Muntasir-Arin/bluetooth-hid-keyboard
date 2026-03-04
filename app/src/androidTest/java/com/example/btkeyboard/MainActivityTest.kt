@@ -22,8 +22,8 @@ class MainActivityTest {
     }
 
     @Test
-    fun trackpadTabCanBeOpenedFromBottomBar() {
-        rule.onNodeWithContentDescription("Trackpad").performClick()
-        rule.onNodeWithText("Trackpad").assertIsDisplayed()
+    fun touchpadTabCanBeOpenedFromBottomBar() {
+        rule.onNodeWithContentDescription("Touchpad").performClick()
+        rule.onNodeWithText("Touchpad").assertIsDisplayed()
     }
 }

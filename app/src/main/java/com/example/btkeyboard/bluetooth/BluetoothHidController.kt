@@ -31,7 +31,9 @@ import kotlin.coroutines.resumeWithException
 import kotlin.math.roundToInt
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.TimeoutCancellationException
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
@@ -67,6 +69,7 @@ class BluetoothHidController(
         dedupeWindowMs = DISCOVERY_FAILURE_DEDUPE_WINDOW_MS,
         nowProvider = { SystemClock.elapsedRealtime() },
     )
+    private val discoveryOwnershipTracker = DiscoveryOwnershipTracker()
 
     private val bluetoothAdapter: BluetoothAdapter? =
         context.getSystemService(BluetoothManager::class.java)?.adapter
@@ -80,6 +83,7 @@ class BluetoothHidController(
     private val _unsupportedCharCount = MutableStateFlow(0)
     private val _acknowledgedDescriptorVersionOverride = MutableStateFlow<Int?>(null)
     private val _hidCapability = MutableStateFlow(HidCapability.UNKNOWN)
+    private val _isHostConnected = MutableStateFlow(false)
 
     @Volatile
     private var hidDevice: BluetoothHidDevice? = null
@@ -89,6 +93,9 @@ class BluetoothHidController(
 
     @Volatile
     private var lastDiscoveryStartedSignalAtMs: Long = 0L
+
+    private var pendingPairingAddress: String? = null
+    private var pairingTimeoutJob: Job? = null
 
     private val appRegistered = AtomicBoolean(false)
     private var lastProfileProxyErrorCode: ErrorCode = ErrorCode.PROFILE_UNAVAILABLE
@@ -105,6 +112,7 @@ class BluetoothHidController(
     val pressedMouseButtons: StateFlow<Set<MouseButton>> = _pressedMouseButtons.asStateFlow()
     val unsupportedCharCount: StateFlow<Int> = _unsupportedCharCount.asStateFlow()
     val hidCapability: StateFlow<HidCapability> = _hidCapability.asStateFlow()
+    val isHostConnected: StateFlow<Boolean> = _isHostConnected.asStateFlow()
     val settings = settingsStore.settings.stateIn(
         scope,
         started = SharingStarted.Eagerly,
@@ -119,7 +127,7 @@ class BluetoothHidController(
             appSettings.acknowledgedHidDescriptorVersion,
             override ?: 0,
         )
-        acknowledged < CURRENT_HID_DESCRIPTOR_VERSION && trusted.isNotEmpty()
+        acknowledged < HidDescriptorVersion.CURRENT && trusted.isNotEmpty()
     }.stateIn(scope, started = SharingStarted.Eagerly, initialValue = false)
 
     override val state: StateFlow<ConnectionState> = _state.asStateFlow()
@@ -129,7 +137,9 @@ class BluetoothHidController(
             appRegistered.set(registered)
             logger.log("HID app status changed: registered=$registered")
             if (!registered) {
+                clearPendingPairing()
                 connectedDevice = null
+                _isHostConnected.value = false
                 _activeModifiers.value = emptySet()
                 _pressedMouseButtons.value = emptySet()
                 _state.value = ConnectionState.Idle
@@ -139,7 +149,9 @@ class BluetoothHidController(
         override fun onConnectionStateChanged(device: BluetoothDevice, state: Int) {
             when (state) {
                 BluetoothProfile.STATE_CONNECTED -> {
+                    clearPendingPairing()
                     connectedDevice = device
+                    _isHostConnected.value = true
                     val host = device.toHostDevice(connected = true)
                     _state.value = ConnectionState.Connected(host, latencyMs = 0)
                     logger.log("Connected to ${host.name} (${host.address})")
@@ -156,12 +168,12 @@ class BluetoothHidController(
 
                 BluetoothProfile.STATE_DISCONNECTED -> {
                     logger.log("Disconnected from ${device.address}")
+                    clearPendingPairing()
                     connectedDevice = null
+                    _isHostConnected.value = false
                     _activeModifiers.value = emptySet()
                     _pressedMouseButtons.value = emptySet()
-                    if (_state.value !is ConnectionState.Discovering) {
-                        _state.value = ConnectionState.Idle
-                    }
+                    _state.value = ConnectionState.Idle
                 }
 
                 BluetoothProfile.STATE_DISCONNECTING -> {
@@ -181,7 +193,9 @@ class BluetoothHidController(
 
         override fun onVirtualCableUnplug(device: BluetoothDevice) {
             logger.log("Virtual cable unplugged by ${device.address}")
+            clearPendingPairing()
             connectedDevice = null
+            _isHostConnected.value = false
             _activeModifiers.value = emptySet()
             _pressedMouseButtons.value = emptySet()
             _state.value = ConnectionState.Idle
@@ -204,20 +218,48 @@ class BluetoothHidController(
                 }
 
                 BluetoothAdapter.ACTION_DISCOVERY_FINISHED -> {
-                    logger.log("Bluetooth discovery finished")
-                    if (_state.value is ConnectionState.Discovering) {
-                        _state.value = ConnectionState.Idle
+                    val appOwned = discoveryOwnershipTracker.onDiscoveryFinishedBroadcast()
+                    if (appOwned) {
+                        logger.log("Bluetooth discovery finished (app-owned)")
+                        if (_state.value is ConnectionState.Discovering) {
+                            _state.value = ConnectionState.Idle
+                        }
+                    } else {
+                        logger.log("Bluetooth discovery finished externally; app state unchanged")
                     }
                 }
 
                 BluetoothAdapter.ACTION_DISCOVERY_STARTED -> {
                     lastDiscoveryStartedSignalAtMs = SystemClock.elapsedRealtime()
-                    logger.log("Bluetooth discovery started")
-                    _state.value = ConnectionState.Discovering
+                    val appOwned = discoveryOwnershipTracker.onDiscoveryStartedBroadcast()
+                    if (appOwned) {
+                        logger.log("Bluetooth discovery started (app-owned)")
+                        _state.value = ConnectionState.Discovering
+                    } else {
+                        logger.log("Bluetooth discovery started externally; app state unchanged")
+                    }
                 }
 
                 BluetoothDevice.ACTION_BOND_STATE_CHANGED -> {
-                    refreshBondedDevicesAsync()
+                    val device = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                        intent.getParcelableExtra(BluetoothDevice.EXTRA_DEVICE, BluetoothDevice::class.java)
+                    } else {
+                        @Suppress("DEPRECATION")
+                        intent.getParcelableExtra(BluetoothDevice.EXTRA_DEVICE)
+                    }
+                    if (device != null) {
+                        val bondState = intent.getIntExtra(
+                            BluetoothDevice.EXTRA_BOND_STATE,
+                            BluetoothDevice.ERROR,
+                        )
+                        val previousBondState = intent.getIntExtra(
+                            BluetoothDevice.EXTRA_PREVIOUS_BOND_STATE,
+                            BluetoothDevice.ERROR,
+                        )
+                        onBondStateChanged(device, bondState, previousBondState)
+                    } else {
+                        refreshBondedDevicesAsync()
+                    }
                 }
 
                 BluetoothAdapter.ACTION_STATE_CHANGED -> {
@@ -276,15 +318,23 @@ class BluetoothHidController(
         }
 
         if (adapter.isDiscovering) {
-            logger.log("Bluetooth discovery already running")
-            _state.value = ConnectionState.Discovering
-            return@withContext Result.success(Unit)
+            if (discoveryOwnershipTracker.isAppOwnedActive()) {
+                logger.log("Bluetooth discovery already running (app-owned)")
+                _state.value = ConnectionState.Discovering
+                return@withContext Result.success(Unit)
+            }
+            return@withContext discoveryFailure(
+                "Bluetooth discovery is already running from another app/system flow. Stop it and retry.",
+                adapter,
+            )
         }
 
+        discoveryOwnershipTracker.markStartRequested()
         val started = runCatching {
             _discoveredDevices.value = emptyList()
             adapter.startDiscovery()
         }.getOrElse {
+            discoveryOwnershipTracker.clear()
             return@withContext discoveryFailure(
                 "Unable to start discovery: ${it.message}. " +
                     "You can still pair via system Bluetooth settings.",
@@ -297,7 +347,7 @@ class BluetoothHidController(
             val reconciled = discoveryStartReconciler.awaitStartConfirmation(
                 graceMs = DISCOVERY_START_CALLBACK_GRACE_MS,
             ) {
-                runCatching { adapter.isDiscovering }.getOrDefault(false) ||
+                safeIsDiscovering(adapter) ||
                     lastDiscoveryStartedSignalAtMs >= requestStartedAt
             }
             logger.log(
@@ -305,9 +355,11 @@ class BluetoothHidController(
                     "callback-confirmed=${reconciled.started} waitMs=${reconciled.waitMs}",
             )
             if (reconciled.started) {
+                discoveryOwnershipTracker.markStartedBySubmission()
                 _state.value = ConnectionState.Discovering
                 return@withContext Result.success(Unit)
             }
+            discoveryOwnershipTracker.clear()
             val hint = when (adapter.state) {
                 BluetoothAdapter.STATE_OFF -> "Bluetooth is off. Enable Bluetooth first."
                 BluetoothAdapter.STATE_TURNING_ON -> "Bluetooth is turning on. Try again in a moment."
@@ -325,7 +377,8 @@ class BluetoothHidController(
             return@withContext discoveryFailure(hint, adapter)
         }
 
-        logger.log("Bluetooth discovery started")
+        discoveryOwnershipTracker.markStartedBySubmission()
+        logger.log("Bluetooth discovery started (app-owned)")
         _state.value = ConnectionState.Discovering
         Result.success(Unit)
     }
@@ -334,10 +387,18 @@ class BluetoothHidController(
     suspend fun stopDiscovery() = withContext(commandDispatcher) {
         val adapter = bluetoothAdapter ?: return@withContext
         if (!hasScanPermission()) return@withContext
-        if (adapter.isDiscovering) {
-            adapter.cancelDiscovery()
-            logger.log("Bluetooth discovery cancelled")
+        if (!discoveryOwnershipTracker.isAppOwnedActive()) {
+            logger.log("Ignoring stopDiscovery: app does not own active discovery")
+            return@withContext
         }
+        if (adapter.isDiscovering && hasScanPermission()) {
+            @SuppressLint("MissingPermission")
+            val cancelled = runCatching { adapter.cancelDiscovery() }.getOrDefault(false)
+            if (cancelled) {
+                logger.log("Bluetooth discovery cancelled (app-owned)")
+            }
+        }
+        discoveryOwnershipTracker.clear()
         if (_state.value is ConnectionState.Discovering) {
             _state.value = ConnectionState.Idle
         }
@@ -355,14 +416,18 @@ class BluetoothHidController(
         runCatching {
             val remote = adapter.getRemoteDevice(device.address)
             _state.value = ConnectionState.Pairing(device)
+            pendingPairingAddress = remote.address
+            armPairingTimeout(remote.address)
             @SuppressLint("MissingPermission")
             val initiated = remote.createBond()
             if (!initiated) {
+                clearPendingPairing()
                 throw IllegalStateException("Bonding request failed to start")
             }
             logger.log("Pairing initiated for ${device.address}")
             Unit
         }.onFailure {
+            clearPendingPairing()
             _state.value = ConnectionState.Error(
                 code = ErrorCode.CONNECTION_FAILED,
                 message = "Pairing failed: ${it.message}",
@@ -557,10 +622,19 @@ class BluetoothHidController(
     }
 
     fun acknowledgeHidDescriptorMigration() {
-        _acknowledgedDescriptorVersionOverride.value = CURRENT_HID_DESCRIPTOR_VERSION
+        _acknowledgedDescriptorVersionOverride.value = HidDescriptorVersion.CURRENT
         scope.launch(commandDispatcher) {
-            settingsStore.updateAcknowledgedHidDescriptorVersion(CURRENT_HID_DESCRIPTOR_VERSION)
+            settingsStore.updateAcknowledgedHidDescriptorVersion(HidDescriptorVersion.CURRENT)
             logger.log("HID descriptor migration acknowledged")
+        }
+    }
+
+    fun markNotificationPermissionPrompted() {
+        if (settings.value.notificationPermissionPrompted) {
+            return
+        }
+        scope.launch(commandDispatcher) {
+            settingsStore.updateNotificationPermissionPrompted(prompted = true)
         }
     }
 
@@ -712,7 +786,9 @@ class BluetoothHidController(
         }
 
         appRegistered.set(false)
+        clearPendingPairing()
         connectedDevice = null
+        _isHostConnected.value = false
         _state.value = ConnectionState.Idle
         logger.log("HID app unregistered")
         return Result.success(Unit)
@@ -1011,7 +1087,7 @@ class BluetoothHidController(
             settings.value.acknowledgedHidDescriptorVersion,
             _acknowledgedDescriptorVersionOverride.value ?: 0,
         )
-        return acknowledged < CURRENT_HID_DESCRIPTOR_VERSION && _trustedDevices.value.isNotEmpty()
+        return acknowledged < HidDescriptorVersion.CURRENT && _trustedDevices.value.isNotEmpty()
     }
 
     private suspend fun sendModifierOnlyReport(): Result<Unit> {
@@ -1091,6 +1167,7 @@ class BluetoothHidController(
         message: String,
         adapter: BluetoothAdapter?,
     ): Result<Unit> {
+        discoveryOwnershipTracker.clear()
         val snapshot = buildDiscoveryFailureSnapshot(adapter)
         val fingerprint = "$message|$snapshot"
         if (discoveryFailureLimiter.shouldLog(fingerprint)) {
@@ -1105,7 +1182,11 @@ class BluetoothHidController(
 
     private fun buildDiscoveryFailureSnapshot(adapter: BluetoothAdapter?): String {
         val adapterState = adapter?.let { bluetoothAdapterStateName(it.state) } ?: "NULL"
-        val adapterDiscovering = adapter?.let { runCatching { it.isDiscovering }.getOrDefault(false) } ?: false
+        val adapterDiscovering = if (adapter == null || !hasScanPermission()) {
+            false
+        } else {
+            safeIsDiscovering(adapter)
+        }
         return "adapterState=$adapterState " +
             "isDiscovering=$adapterDiscovering " +
             "scanPerm=${hasScanPermission()} " +
@@ -1114,6 +1195,11 @@ class BluetoothHidController(
             "connectionState=${_state.value.diagnosticLabel()} " +
             "appRegistered=${appRegistered.get()} " +
             "hidCapability=${_hidCapability.value}"
+    }
+
+    @SuppressLint("MissingPermission")
+    private fun safeIsDiscovering(adapter: BluetoothAdapter): Boolean {
+        return runCatching { adapter.isDiscovering }.getOrDefault(false)
     }
 
     private fun bluetoothAdapterStateName(state: Int): String {
@@ -1143,9 +1229,86 @@ class BluetoothHidController(
         }
     }
 
+    private fun onBondStateChanged(
+        device: BluetoothDevice,
+        bondState: Int,
+        previousBondState: Int,
+    ) {
+        scope.launch(commandDispatcher) {
+            when (
+                PairingReconciler.resolve(
+                    pendingAddress = pendingPairingAddress,
+                    deviceAddress = device.address,
+                    bondState = bondState,
+                    previousBondState = previousBondState,
+                )
+            ) {
+                PairingResolution.SUCCESS -> {
+                    clearPendingPairing()
+                    logger.log("Pairing completed for ${device.address}")
+                    val currentState = _state.value
+                    if (currentState is ConnectionState.Pairing && currentState.device.address == device.address) {
+                        if (connectedDevice?.address == device.address) {
+                            _state.value = ConnectionState.Connected(
+                                device = device.toHostDevice(connected = true),
+                                latencyMs = 0L,
+                            )
+                        } else {
+                            _state.value = ConnectionState.Idle
+                        }
+                    }
+                }
+
+                PairingResolution.FAILED_OR_CANCELLED -> {
+                    clearPendingPairing()
+                    logger.log("Pairing failed or was cancelled for ${device.address}")
+                    val currentState = _state.value
+                    if (currentState is ConnectionState.Pairing && currentState.device.address == device.address) {
+                        _state.value = ConnectionState.Error(
+                            code = ErrorCode.CONNECTION_FAILED,
+                            message = "Pairing failed or was cancelled. Retry from devices list.",
+                        )
+                    }
+                }
+
+                PairingResolution.NONE -> Unit
+            }
+            refreshBondedDevicesInternal()
+        }
+    }
+
+    private fun armPairingTimeout(address: String) {
+        pairingTimeoutJob?.cancel()
+        pairingTimeoutJob = scope.launch(commandDispatcher) {
+            delay(PAIRING_TIMEOUT_MS)
+            if (pendingPairingAddress != address) {
+                return@launch
+            }
+            pendingPairingAddress = null
+            pairingTimeoutJob = null
+            val currentState = _state.value
+            if (currentState is ConnectionState.Pairing && currentState.device.address == address) {
+                _state.value = ConnectionState.Error(
+                    code = ErrorCode.CONNECTION_FAILED,
+                    message = "Pairing timed out. Retry and confirm pairing on both devices.",
+                )
+            }
+            logger.log("Pairing timed out for $address")
+        }
+    }
+
+    private fun clearPendingPairing() {
+        pendingPairingAddress = null
+        pairingTimeoutJob?.cancel()
+        pairingTimeoutJob = null
+    }
+
     private fun onBluetoothTurnedOff() {
         appRegistered.set(false)
+        clearPendingPairing()
+        discoveryOwnershipTracker.clear()
         connectedDevice = null
+        _isHostConnected.value = false
         hidDevice = null
         _hidCapability.value = HidCapability.UNKNOWN
         profileCircuitBreaker.reset()
@@ -1156,6 +1319,8 @@ class BluetoothHidController(
     }
 
     private fun onBluetoothTurnedOn() {
+        clearPendingPairing()
+        discoveryOwnershipTracker.clear()
         hidDevice = null
         _hidCapability.value = HidCapability.UNKNOWN
         profileCircuitBreaker.reset()
@@ -1177,9 +1342,12 @@ class BluetoothHidController(
     }
 
     private fun handleHidServiceDisconnected(message: String) {
+        clearPendingPairing()
+        discoveryOwnershipTracker.clear()
         hidDevice = null
         appRegistered.set(false)
         connectedDevice = null
+        _isHostConnected.value = false
         _activeModifiers.value = emptySet()
         _pressedMouseButtons.value = emptySet()
         _hidCapability.value = HidCapability.UNAVAILABLE
@@ -1249,7 +1417,6 @@ class BluetoothHidController(
     private class ProfileProxyUnsupportedException : IllegalStateException()
 
     companion object {
-        const val CURRENT_HID_DESCRIPTOR_VERSION = 2
         const val REPAIR_REQUIRED_MESSAGE =
             "Bluetooth HID descriptor changed in this version. Forget this phone from your host and pair again before connecting."
         private const val KEY_USAGE_TAB = 0x2B
@@ -1262,6 +1429,7 @@ class BluetoothHidController(
         private const val REGISTRATION_CALLBACK_GRACE_MS = 750L
         private const val DISCOVERY_START_CALLBACK_GRACE_MS = 400L
         private const val DISCOVERY_FAILURE_DEDUPE_WINDOW_MS = 10_000L
+        private const val PAIRING_TIMEOUT_MS = 45_000L
         private const val POINTER_STATS_LOG_EVERY = 1200L
     }
 }

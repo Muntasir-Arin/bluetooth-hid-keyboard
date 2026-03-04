@@ -35,7 +35,10 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
+import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import androidx.lifecycle.lifecycleScope
+import androidx.lifecycle.repeatOnLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
@@ -60,10 +63,17 @@ import com.example.btkeyboard.ui.viewmodel.SettingsViewModel
 import com.example.btkeyboard.ui.viewmodel.TrackpadViewModel
 import com.example.btkeyboard.util.BluetoothPermissionHelper
 import com.example.btkeyboard.util.DiagnosticsExporter
+import com.example.btkeyboard.util.NotificationPermissionPromptPolicy
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.launch
 
 class MainActivity : ComponentActivity() {
 
     private var pendingPermissionAction: (() -> Unit)? = null
+    private var notificationPermissionPrompted: Boolean = false
+    private var notificationPermissionRequestInFlight: Boolean = false
+    private val app by lazy { application as BtKeyboardApplication }
 
     private val permissionLauncher = registerForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions(),
@@ -78,11 +88,30 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    private val notificationPermissionLauncher = registerForActivityResult(
+        ActivityResultContracts.RequestPermission(),
+    ) {
+        notificationPermissionRequestInFlight = false
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
+        lifecycleScope.launch {
+            repeatOnLifecycle(Lifecycle.State.STARTED) {
+                app.hidController.settings
+                    .map { it.notificationPermissionPrompted }
+                    .distinctUntilChanged()
+                    .collect { prompted ->
+                        notificationPermissionPrompted = prompted
+                        if (prompted) {
+                            notificationPermissionRequestInFlight = false
+                        }
+                    }
+            }
+        }
+
         setContent {
-            val app = application as BtKeyboardApplication
             val factory = remember { AppViewModelFactory(app) }
 
             val devicesViewModel: DevicesViewModel = viewModel(factory = factory)
@@ -375,13 +404,10 @@ class MainActivity : ComponentActivity() {
         bluetoothPermissions: Array<String>,
         action: () -> Unit,
     ) {
-        val requiredPermissions = (bluetoothPermissions.toList() +
-            BluetoothPermissionHelper.notificationPermissions().toList())
-            .distinct()
-            .toTypedArray()
-        withPermissions(requiredPermissions) {
+        withPermissions(bluetoothPermissions) {
             if (ensureKeyboardServiceRunning()) {
                 action()
+                maybePromptNotificationPermissionNonBlocking()
             }
         }
     }
@@ -418,6 +444,38 @@ class MainActivity : ComponentActivity() {
         runCatching {
             startService(intent)
         }
+    }
+
+    private fun maybePromptNotificationPermissionNonBlocking() {
+        val notificationPermissions = BluetoothPermissionHelper.notificationPermissions()
+        val runtimePermissionRequired = notificationPermissions.isNotEmpty()
+        val alreadyGranted = BluetoothPermissionHelper.hasAll(this, notificationPermissions)
+        val shouldPrompt = NotificationPermissionPromptPolicy.shouldPrompt(
+            runtimePermissionRequired = runtimePermissionRequired,
+            alreadyGranted = alreadyGranted,
+            alreadyPrompted = notificationPermissionPrompted,
+        )
+
+        if (!runtimePermissionRequired) {
+            return
+        }
+
+        if (alreadyGranted) {
+            if (!notificationPermissionPrompted) {
+                notificationPermissionPrompted = true
+                app.hidController.markNotificationPermissionPrompted()
+            }
+            return
+        }
+
+        if (!shouldPrompt || notificationPermissionRequestInFlight) {
+            return
+        }
+
+        notificationPermissionPrompted = true
+        notificationPermissionRequestInFlight = true
+        app.hidController.markNotificationPermissionPrompted()
+        notificationPermissionLauncher.launch(notificationPermissions.first())
     }
 
     private fun toast(message: String) {

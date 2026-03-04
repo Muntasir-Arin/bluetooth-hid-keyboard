@@ -24,10 +24,12 @@ class BluetoothHidForegroundService : Service() {
 
     private val serviceScope: CoroutineScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
     private var notificationJob: Job? = null
+    private var hostConnectionJob: Job? = null
     private var startupJob: Job? = null
     private var idleStopJob: Job? = null
     private var appInForeground: Boolean = true
     private var latestConnectionState: ConnectionState = ConnectionState.Idle
+    private var latestIsHostConnected: Boolean = false
 
     private val app by lazy { application as BtKeyboardApplication }
     private val controller by lazy { app.hidController }
@@ -74,6 +76,12 @@ class BluetoothHidForegroundService : Service() {
                 reevaluateIdleStopPolicy()
             }
         }
+        hostConnectionJob = serviceScope.launch {
+            controller.isHostConnected.collectLatest { connected ->
+                latestIsHostConnected = connected
+                reevaluateIdleStopPolicy()
+            }
+        }
         reevaluateIdleStopPolicy()
     }
 
@@ -101,6 +109,7 @@ class BluetoothHidForegroundService : Service() {
     override fun onDestroy() {
         running = false
         notificationJob?.cancel()
+        hostConnectionJob?.cancel()
         startupJob?.cancel()
         idleStopJob?.cancel()
         serviceScope.launch(Dispatchers.IO) {
@@ -133,7 +142,12 @@ class BluetoothHidForegroundService : Service() {
     }
 
     private fun reevaluateIdleStopPolicy() {
-        if (ServiceIdlePolicy.shouldArmIdleTimer(appInForeground = appInForeground, state = latestConnectionState)) {
+        if (ServiceIdlePolicy.shouldArmIdleTimer(
+                appInForeground = appInForeground,
+                isHostConnected = latestIsHostConnected,
+                state = latestConnectionState,
+            )
+        ) {
             armIdleTimer()
         } else {
             cancelIdleTimer()
@@ -144,7 +158,12 @@ class BluetoothHidForegroundService : Service() {
         idleStopJob?.cancel()
         idleStopJob = serviceScope.launch {
             delay(IDLE_TIMEOUT_MS)
-            if (!ServiceIdlePolicy.shouldArmIdleTimer(appInForeground = appInForeground, state = latestConnectionState)) {
+            if (!ServiceIdlePolicy.shouldArmIdleTimer(
+                    appInForeground = appInForeground,
+                    isHostConnected = latestIsHostConnected,
+                    state = latestConnectionState,
+                )
+            ) {
                 return@launch
             }
             runCatching {

@@ -5,8 +5,9 @@ import com.example.btkeyboard.model.ConnectionState
 internal object ServiceIdlePolicy {
     fun shouldArmIdleTimer(
         appInForeground: Boolean,
+        isHostConnected: Boolean,
         state: ConnectionState,
     ): Boolean {
-        return !appInForeground && state !is ConnectionState.Connected
+        return !appInForeground && !isHostConnected && state !is ConnectionState.Connected
     }
 }

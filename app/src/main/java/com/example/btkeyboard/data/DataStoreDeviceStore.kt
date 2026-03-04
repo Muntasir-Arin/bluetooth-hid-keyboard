@@ -11,12 +11,13 @@ import androidx.datastore.preferences.core.intPreferencesKey
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.core.stringSetPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
+import com.example.btkeyboard.bluetooth.HidDescriptorVersion
 import com.example.btkeyboard.model.HostDevice
+import java.io.IOException
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.catch
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
-import java.io.IOException
 
 private val Context.btKeyboardDataStore: DataStore<Preferences> by preferencesDataStore(name = "bt_keyboard")
 
@@ -33,11 +34,15 @@ class DataStoreDeviceStore(
             }
         }
         .map { prefs ->
+            val hasLegacyPairingData = hasLegacyPairingData(prefs)
             AppSettings(
                 autoReconnect = prefs[Keys.AUTO_RECONNECT] ?: true,
                 pointerSensitivity = prefs[Keys.POINTER_SENSITIVITY] ?: 1.0f,
-                acknowledgedHidDescriptorVersion = prefs[Keys.ACK_HID_DESCRIPTOR_VERSION]
-                    ?: if (hasLegacyPairingData(prefs)) LEGACY_HID_DESCRIPTOR_VERSION else CURRENT_HID_DESCRIPTOR_VERSION,
+                acknowledgedHidDescriptorVersion = HidDescriptorVersion.resolveAcknowledgedVersion(
+                    storedVersion = prefs[Keys.ACK_HID_DESCRIPTOR_VERSION],
+                    hasLegacyPairingData = hasLegacyPairingData,
+                ),
+                notificationPermissionPrompted = prefs[Keys.NOTIFICATION_PERMISSION_PROMPTED] ?: false,
             )
         }
 
@@ -103,6 +108,12 @@ class DataStoreDeviceStore(
         }
     }
 
+    override suspend fun updateNotificationPermissionPrompted(prompted: Boolean) {
+        context.btKeyboardDataStore.edit { prefs ->
+            prefs[Keys.NOTIFICATION_PERMISSION_PROMPTED] = prompted
+        }
+    }
+
     private fun encode(device: HostDevice): String {
         val safeName = device.name.replace("|", " ")
         return "${device.address}|$safeName"
@@ -122,14 +133,11 @@ class DataStoreDeviceStore(
         val AUTO_RECONNECT = booleanPreferencesKey("auto_reconnect")
         val POINTER_SENSITIVITY = floatPreferencesKey("pointer_sensitivity")
         val ACK_HID_DESCRIPTOR_VERSION = intPreferencesKey("ack_hid_descriptor_version")
+        val NOTIFICATION_PERMISSION_PROMPTED = booleanPreferencesKey("notification_permission_prompted")
     }
 
     private fun hasLegacyPairingData(prefs: Preferences): Boolean {
         return !prefs[Keys.TRUSTED].isNullOrEmpty() || prefs[Keys.LAST_CONNECTED] != null
     }
 
-    private companion object {
-        const val CURRENT_HID_DESCRIPTOR_VERSION = 2
-        const val LEGACY_HID_DESCRIPTOR_VERSION = 1
-    }
 }

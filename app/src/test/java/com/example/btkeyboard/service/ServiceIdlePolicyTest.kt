@@ -11,11 +11,24 @@ class ServiceIdlePolicyTest {
 
     @Test
     fun shouldArmTimerWhenBackgroundAndDisconnectedLike() {
-        assertTrue(ServiceIdlePolicy.shouldArmIdleTimer(appInForeground = false, state = ConnectionState.Idle))
-        assertTrue(ServiceIdlePolicy.shouldArmIdleTimer(appInForeground = false, state = ConnectionState.Discovering))
         assertTrue(
             ServiceIdlePolicy.shouldArmIdleTimer(
                 appInForeground = false,
+                isHostConnected = false,
+                state = ConnectionState.Idle,
+            ),
+        )
+        assertTrue(
+            ServiceIdlePolicy.shouldArmIdleTimer(
+                appInForeground = false,
+                isHostConnected = false,
+                state = ConnectionState.Discovering,
+            ),
+        )
+        assertTrue(
+            ServiceIdlePolicy.shouldArmIdleTimer(
+                appInForeground = false,
+                isHostConnected = false,
                 state = ConnectionState.Error(
                     code = ErrorCode.CONNECTION_FAILED,
                     message = "failure",
@@ -26,10 +39,17 @@ class ServiceIdlePolicyTest {
 
     @Test
     fun shouldNotArmTimerWhenForeground() {
-        assertFalse(ServiceIdlePolicy.shouldArmIdleTimer(appInForeground = true, state = ConnectionState.Idle))
         assertFalse(
             ServiceIdlePolicy.shouldArmIdleTimer(
                 appInForeground = true,
+                isHostConnected = false,
+                state = ConnectionState.Idle,
+            ),
+        )
+        assertFalse(
+            ServiceIdlePolicy.shouldArmIdleTimer(
+                appInForeground = true,
+                isHostConnected = true,
                 state = ConnectionState.Connected(
                     device = HostDevice(
                         name = "Desk",
@@ -52,6 +72,23 @@ class ServiceIdlePolicyTest {
                 connected = true,
             ),
         )
-        assertFalse(ServiceIdlePolicy.shouldArmIdleTimer(appInForeground = false, state = connectedState))
+        assertFalse(
+            ServiceIdlePolicy.shouldArmIdleTimer(
+                appInForeground = false,
+                isHostConnected = true,
+                state = connectedState,
+            ),
+        )
+    }
+
+    @Test
+    fun shouldNotArmTimerWhenStateLooksDisconnectedButHostStillConnected() {
+        assertFalse(
+            ServiceIdlePolicy.shouldArmIdleTimer(
+                appInForeground = false,
+                isHostConnected = true,
+                state = ConnectionState.Idle,
+            ),
+        )
     }
 }
