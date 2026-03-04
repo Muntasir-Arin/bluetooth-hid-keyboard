@@ -15,6 +15,7 @@ import android.location.LocationManager
 import android.os.Build
 import android.os.SystemClock
 import com.example.btkeyboard.data.AppSettingsStore
+import com.example.btkeyboard.data.AppThemeMode
 import com.example.btkeyboard.data.DeviceStore
 import com.example.btkeyboard.model.ConnectionState
 import com.example.btkeyboard.model.ErrorCode
@@ -666,6 +667,13 @@ class BluetoothHidController(
         scope.launch(commandDispatcher) {
             settingsStore.updatePointerSensitivity(clamped)
             logger.log("Pointer sensitivity set to $clamped")
+        }
+    }
+
+    fun updateThemeMode(mode: AppThemeMode) {
+        scope.launch(commandDispatcher) {
+            settingsStore.updateThemeMode(mode)
+            logger.log("Theme mode set to ${mode.name}")
         }
     }
 

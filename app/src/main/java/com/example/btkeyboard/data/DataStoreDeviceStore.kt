@@ -38,6 +38,7 @@ class DataStoreDeviceStore(
             AppSettings(
                 autoReconnect = prefs[Keys.AUTO_RECONNECT] ?: true,
                 pointerSensitivity = prefs[Keys.POINTER_SENSITIVITY] ?: 1.0f,
+                themeMode = AppThemeMode.fromStoredValue(prefs[Keys.THEME_MODE]),
                 acknowledgedHidDescriptorVersion = HidDescriptorVersion.resolveAcknowledgedVersion(
                     storedVersion = prefs[Keys.ACK_HID_DESCRIPTOR_VERSION],
                     hasLegacyPairingData = hasLegacyPairingData,
@@ -102,6 +103,12 @@ class DataStoreDeviceStore(
         }
     }
 
+    override suspend fun updateThemeMode(mode: AppThemeMode) {
+        context.btKeyboardDataStore.edit { prefs ->
+            prefs[Keys.THEME_MODE] = mode.name
+        }
+    }
+
     override suspend fun updateAcknowledgedHidDescriptorVersion(version: Int) {
         context.btKeyboardDataStore.edit { prefs ->
             prefs[Keys.ACK_HID_DESCRIPTOR_VERSION] = version
@@ -132,6 +139,7 @@ class DataStoreDeviceStore(
         val LAST_CONNECTED = stringPreferencesKey("last_connected")
         val AUTO_RECONNECT = booleanPreferencesKey("auto_reconnect")
         val POINTER_SENSITIVITY = floatPreferencesKey("pointer_sensitivity")
+        val THEME_MODE = stringPreferencesKey("theme_mode")
         val ACK_HID_DESCRIPTOR_VERSION = intPreferencesKey("ack_hid_descriptor_version")
         val NOTIFICATION_PERMISSION_PROMPTED = booleanPreferencesKey("notification_permission_prompted")
     }

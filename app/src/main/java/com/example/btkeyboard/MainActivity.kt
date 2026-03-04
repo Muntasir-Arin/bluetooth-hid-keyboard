@@ -11,8 +11,11 @@ import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -161,7 +164,7 @@ class MainActivity : ComponentActivity() {
                 }
             }
 
-            BtKeyboardTheme {
+            BtKeyboardTheme(themeMode = settings.themeMode) {
                 if (showRepairDialog) {
                     RepairRequiredDialog(
                         onDismiss = { showRepairDialog = false },
@@ -184,6 +187,7 @@ class MainActivity : ComponentActivity() {
 
                 Scaffold(
                     containerColor = MaterialTheme.colorScheme.background,
+                    contentWindowInsets = WindowInsets(0, 0, 0, 0),
                     topBar = {
                         AppTopBar(
                             title = currentDestination.title,
@@ -369,6 +373,7 @@ class MainActivity : ComponentActivity() {
                             SettingsScreen(
                                 settings = settings,
                                 diagnostics = diagnostics,
+                                onThemeModeChange = settingsViewModel::setThemeMode,
                                 onAutoReconnectChange = settingsViewModel::setAutoReconnect,
                                 onPointerSensitivityChange = settingsViewModel::setPointerSensitivity,
                                 onClearTrustedDevices = settingsViewModel::clearTrustedDevices,
@@ -493,14 +498,18 @@ private fun AppTopBar(
     Surface(
         modifier = Modifier
             .fillMaxWidth()
-            .border(UiTokens.BorderWidth, MaterialTheme.colorScheme.outline),
+            .border(
+                width = UiTokens.BorderWidth,
+                color = MaterialTheme.colorScheme.outlineVariant,
+            )
+            .statusBarsPadding(),
         color = MaterialTheme.colorScheme.surface,
     ) {
         Column(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(horizontal = UiTokens.ScreenPadding, vertical = 12.dp),
-            verticalArrangement = Arrangement.spacedBy(10.dp),
+                .padding(horizontal = UiTokens.ScreenPadding, vertical = UiTokens.Space2),
+            verticalArrangement = Arrangement.spacedBy(UiTokens.Space2),
         ) {
             Box(
                 modifier = Modifier.fillMaxWidth(),
@@ -522,7 +531,10 @@ private fun AppTopBar(
                     }
                 }
             }
-            ConnectionStatusPill(connectionState = connectionState)
+            ConnectionStatusPill(
+                connectionState = connectionState,
+                modifier = Modifier.align(Alignment.Start),
+            )
         }
     }
 }
@@ -533,28 +545,39 @@ private fun AppBottomBar(
     destinations: List<AppDestination>,
     onSelect: (AppDestination) -> Unit,
 ) {
-    NavigationBar(
-        containerColor = MaterialTheme.colorScheme.surface,
-        tonalElevation = 0.dp,
+    Surface(
+        modifier = Modifier
+            .fillMaxWidth()
+            .border(
+                width = UiTokens.BorderWidth,
+                color = MaterialTheme.colorScheme.outlineVariant,
+            ),
+        color = MaterialTheme.colorScheme.surface,
     ) {
-        destinations.forEach { destination ->
-            NavigationBarItem(
-                selected = selectedRoute == destination.route,
-                onClick = { onSelect(destination) },
-                icon = {
-                    Icon(
-                        imageVector = destination.icon,
-                        contentDescription = destination.title,
-                    )
-                },
-                label = null,
-                alwaysShowLabel = false,
-                colors = NavigationBarItemDefaults.colors(
-                    selectedIconColor = MaterialTheme.colorScheme.primary,
-                    unselectedIconColor = MaterialTheme.colorScheme.onSurfaceVariant,
-                    indicatorColor = MaterialTheme.colorScheme.surfaceVariant,
-                ),
-            )
+        NavigationBar(
+            modifier = Modifier.navigationBarsPadding(),
+            containerColor = MaterialTheme.colorScheme.surface,
+            tonalElevation = 0.dp,
+        ) {
+            destinations.forEach { destination ->
+                NavigationBarItem(
+                    selected = selectedRoute == destination.route,
+                    onClick = { onSelect(destination) },
+                    icon = {
+                        Icon(
+                            imageVector = destination.icon,
+                            contentDescription = destination.title,
+                        )
+                    },
+                    label = null,
+                    alwaysShowLabel = false,
+                    colors = NavigationBarItemDefaults.colors(
+                        selectedIconColor = MaterialTheme.colorScheme.primary,
+                        unselectedIconColor = MaterialTheme.colorScheme.onSurfaceVariant,
+                        indicatorColor = MaterialTheme.colorScheme.surfaceVariant,
+                    ),
+                )
+            }
         }
     }
 }

@@ -5,6 +5,8 @@ import androidx.compose.foundation.border
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
@@ -24,11 +26,15 @@ import androidx.compose.ui.unit.dp
 import com.example.btkeyboard.model.ConnectionState
 import com.example.btkeyboard.model.MouseButton
 import com.example.btkeyboard.ui.components.AppCard
-import com.example.btkeyboard.ui.components.SectionTitle
+import com.example.btkeyboard.ui.components.AppCardVariant
+import com.example.btkeyboard.ui.components.ConnectionStatusPill
+import com.example.btkeyboard.ui.components.InfoChip
+import com.example.btkeyboard.ui.components.SectionHeader
 import com.example.btkeyboard.ui.components.shortLabel
 import com.example.btkeyboard.ui.theme.UiTokens
 import kotlin.math.abs
 
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 fun TrackpadScreen(
     connectionState: ConnectionState,
@@ -58,40 +64,30 @@ fun TrackpadScreen(
             .padding(UiTokens.ScreenPadding),
         verticalArrangement = Arrangement.spacedBy(UiTokens.SectionSpacing),
     ) {
-        AppCard(modifier = Modifier.fillMaxWidth()) {
+        AppCard(
+            modifier = Modifier.fillMaxWidth(),
+            variant = AppCardVariant.Emphasis,
+        ) {
             Column(
                 modifier = Modifier
                     .fillMaxWidth()
                     .padding(UiTokens.CardPadding),
-                verticalArrangement = Arrangement.spacedBy(8.dp),
+                verticalArrangement = Arrangement.spacedBy(UiTokens.Space2),
             ) {
-                SectionTitle("Touchpad")
-                Text(
-                    text = "Status: ${connectionState.shortLabel()} • Sensitivity: ${sensitivity}x",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                SectionHeader(
+                    title = "Touchpad",
+                    subtitle = "Precision gestures mapped to host mouse and shortcuts.",
                 )
-                Text(
-                    text = "1 finger: move, tap, double-tap, hold+drag",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-                Text(
-                    text = "2 fingers: right-click tap, vertical/horizontal scroll, pinch zoom, hold+drag",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-                Text(
-                    text = "3 fingers: swipe up/down/left/right app shortcuts, tap lookup",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-                if (MouseButton.LEFT in pressedButtons) {
-                    Text(
-                        text = "Drag active",
-                        style = MaterialTheme.typography.labelMedium,
-                        color = MaterialTheme.colorScheme.primary,
-                    )
+                ConnectionStatusPill(connectionState = connectionState)
+                FlowRow(
+                    horizontalArrangement = Arrangement.spacedBy(UiTokens.Space2),
+                    verticalArrangement = Arrangement.spacedBy(UiTokens.Space2),
+                ) {
+                    InfoChip(label = "Status", value = connectionState.shortLabel())
+                    InfoChip(label = "Sensitivity", value = "${sensitivity}x")
+                    if (MouseButton.LEFT in pressedButtons) {
+                        InfoChip(label = "Drag", value = "Active")
+                    }
                 }
             }
         }
@@ -100,6 +96,7 @@ fun TrackpadScreen(
             modifier = Modifier
                 .fillMaxWidth()
                 .weight(1f),
+            variant = AppCardVariant.Interactive,
         ) {
             Column(
                 modifier = Modifier
@@ -319,7 +316,33 @@ fun TrackpadScreen(
                     text = "Touch surface",
                     style = MaterialTheme.typography.bodyMedium,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    modifier = Modifier.padding(12.dp),
+                    modifier = Modifier.padding(UiTokens.Space3),
+                )
+            }
+        }
+
+        AppCard(modifier = Modifier.fillMaxWidth()) {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(UiTokens.CardPadding),
+                verticalArrangement = Arrangement.spacedBy(UiTokens.Space1),
+            ) {
+                SectionHeader(title = "Gestures")
+                Text(
+                    text = "1 finger: move, tap, double-tap, hold+drag",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                Text(
+                    text = "2 fingers: right-click tap, vertical/horizontal scroll, pinch zoom, hold+drag",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                Text(
+                    text = "3 fingers: swipe up/down/left/right shortcuts, tap lookup",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             }
         }

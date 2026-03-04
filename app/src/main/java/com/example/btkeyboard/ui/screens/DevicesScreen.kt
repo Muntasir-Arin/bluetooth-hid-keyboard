@@ -10,20 +10,21 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
-import androidx.compose.material3.Button
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.unit.dp
 import com.example.btkeyboard.model.ConnectionState
-import com.example.btkeyboard.model.HostDevice
 import com.example.btkeyboard.model.HidCapability
+import com.example.btkeyboard.model.HostDevice
+import com.example.btkeyboard.ui.components.AppButton
+import com.example.btkeyboard.ui.components.AppButtonVariant
 import com.example.btkeyboard.ui.components.AppCard
-import com.example.btkeyboard.ui.components.SectionTitle
-import com.example.btkeyboard.ui.components.shortLabel
+import com.example.btkeyboard.ui.components.AppCardVariant
+import com.example.btkeyboard.ui.components.ConnectionStatusPill
+import com.example.btkeyboard.ui.components.EmptyState
+import com.example.btkeyboard.ui.components.InfoChip
+import com.example.btkeyboard.ui.components.SectionHeader
 import com.example.btkeyboard.ui.theme.UiTokens
 
 @OptIn(ExperimentalLayoutApi::class)
@@ -57,55 +58,84 @@ fun DevicesScreen(
         verticalArrangement = Arrangement.spacedBy(UiTokens.SectionSpacing),
     ) {
         item {
-            AppCard(modifier = Modifier.fillMaxWidth()) {
+            AppCard(
+                modifier = Modifier.fillMaxWidth(),
+                variant = AppCardVariant.Emphasis,
+            ) {
                 Column(
                     modifier = Modifier
                         .fillMaxWidth()
                         .padding(UiTokens.CardPadding),
                     verticalArrangement = Arrangement.spacedBy(UiTokens.CardSpacing),
                 ) {
-                    Text("Connection", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
-                    Text("Bluetooth: ${if (bluetoothEnabled) "ON" else "OFF"}")
-                    Text("HID capability: ${hidCapability.label()}")
-                    Text("State: ${connectionState.shortLabel()}")
+                    SectionHeader(
+                        title = "Connection",
+                        subtitle = "Manage Bluetooth discovery and host pairing",
+                    )
+                    ConnectionStatusPill(connectionState = connectionState)
                     FlowRow(
-                        horizontalArrangement = Arrangement.spacedBy(8.dp),
-                        verticalArrangement = Arrangement.spacedBy(8.dp),
+                        horizontalArrangement = Arrangement.spacedBy(UiTokens.Space2),
+                        verticalArrangement = Arrangement.spacedBy(UiTokens.Space2),
                     ) {
-                        if (isDiscovering) {
-                            OutlinedButton(onClick = onStopDiscovery) {
-                                Text("Stop Discovery")
-                            }
-                        } else {
-                            Button(
-                                onClick = onStartDiscovery,
-                                enabled = !discoveryBlockedByConnection,
-                            ) {
-                                Text("Start Discovery")
-                            }
+                        InfoChip(label = "Bluetooth", value = if (bluetoothEnabled) "ON" else "OFF")
+                        InfoChip(label = "HID", value = hidCapability.label())
+                    }
+
+                    if (isDiscovering) {
+                        AppButton(
+                            onClick = onStopDiscovery,
+                            variant = AppButtonVariant.Primary,
+                            modifier = Modifier.fillMaxWidth(),
+                        ) {
+                            Text("Stop Discovery")
                         }
-                        OutlinedButton(onClick = onOpenBluetoothSettings) {
+                    } else {
+                        AppButton(
+                            onClick = onStartDiscovery,
+                            enabled = !discoveryBlockedByConnection,
+                            variant = AppButtonVariant.Primary,
+                            modifier = Modifier.fillMaxWidth(),
+                        ) {
+                            Text("Start Discovery")
+                        }
+                    }
+
+                    FlowRow(
+                        horizontalArrangement = Arrangement.spacedBy(UiTokens.Space2),
+                        verticalArrangement = Arrangement.spacedBy(UiTokens.Space2),
+                    ) {
+                        AppButton(
+                            onClick = onOpenBluetoothSettings,
+                            variant = AppButtonVariant.Secondary,
+                        ) {
                             Text("BT Settings")
                         }
-                        OutlinedButton(onClick = onRefresh) {
+                        AppButton(
+                            onClick = onRefresh,
+                            variant = AppButtonVariant.Secondary,
+                        ) {
                             Text("Refresh")
                         }
                         if (connectionState is ConnectionState.Connected) {
-                            OutlinedButton(onClick = onDisconnect) {
+                            AppButton(
+                                onClick = onDisconnect,
+                                variant = AppButtonVariant.Secondary,
+                            ) {
                                 Text("Disconnect")
                             }
                         }
                     }
+
                     if (discoveryBlockedByConnection) {
                         Text(
-                            text = "Discovery is unavailable while connected. Disconnect first or use Bonded devices.",
+                            text = "Discovery is unavailable while connected. Disconnect first or use bonded devices.",
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
                     }
                     if (hidCapability == HidCapability.UNAVAILABLE) {
                         Text(
-                            text = "This phone/ROM may not expose Bluetooth HID Device mode reliably.",
+                            text = "This phone or ROM may not expose Bluetooth HID Device mode reliably.",
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
@@ -116,30 +146,39 @@ fun DevicesScreen(
 
         if (requiresHostRepair) {
             item {
-                AppCard(modifier = Modifier.fillMaxWidth()) {
+                AppCard(
+                    modifier = Modifier.fillMaxWidth(),
+                    variant = AppCardVariant.Emphasis,
+                ) {
                     Column(
                         modifier = Modifier
                             .fillMaxWidth()
                             .padding(UiTokens.CardPadding),
                         verticalArrangement = Arrangement.spacedBy(UiTokens.CardSpacing),
                     ) {
-                        Text(
-                            "Re-pair required",
-                            style = MaterialTheme.typography.titleMedium,
-                            color = MaterialTheme.colorScheme.primary,
+                        SectionHeader(
+                            title = "Re-pair required",
+                            subtitle = "Touchpad report support changed the HID descriptor.",
                         )
                         Text(
-                            "The HID descriptor now includes touchpad reports. Forget this phone from your host and pair again.",
+                            text = "Forget this phone from your host and pair again to restore full input support.",
                             style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
                         FlowRow(
-                            horizontalArrangement = Arrangement.spacedBy(8.dp),
-                            verticalArrangement = Arrangement.spacedBy(8.dp),
+                            horizontalArrangement = Arrangement.spacedBy(UiTokens.Space2),
+                            verticalArrangement = Arrangement.spacedBy(UiTokens.Space2),
                         ) {
-                            Button(onClick = onOpenBluetoothSettings) {
+                            AppButton(
+                                onClick = onOpenBluetoothSettings,
+                                variant = AppButtonVariant.Primary,
+                            ) {
                                 Text("Open BT Settings")
                             }
-                            OutlinedButton(onClick = onAcknowledgeRepair) {
+                            AppButton(
+                                onClick = onAcknowledgeRepair,
+                                variant = AppButtonVariant.Secondary,
+                            ) {
                                 Text("I Re-paired")
                             }
                         }
@@ -148,13 +187,10 @@ fun DevicesScreen(
             }
         }
 
-        item { SectionTitle("Trusted devices") }
+        item { SectionHeader(title = "Trusted devices") }
         if (trustedDevices.isEmpty()) {
             item {
-                Text(
-                    "No trusted devices yet.",
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
+                EmptyState("No trusted devices yet.")
             }
         } else {
             items(trustedDevices, key = { it.address }) { device ->
@@ -167,10 +203,10 @@ fun DevicesScreen(
             }
         }
 
-        item { SectionTitle("Bonded devices") }
+        item { SectionHeader(title = "Bonded devices") }
         if (bondedDevices.isEmpty()) {
             item {
-                Text("No bonded devices.", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                EmptyState("No bonded devices.")
             }
         } else {
             items(bondedDevices, key = { "bonded-${it.address}" }) { device ->
@@ -182,10 +218,19 @@ fun DevicesScreen(
             }
         }
 
-        item { SectionTitle("Discovered devices") }
+        item { SectionHeader(title = "Discovered devices") }
         if (discoveredDevices.isEmpty()) {
             item {
-                Text("Start discovery to find nearby hosts.", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                val emptyMessage = if (isDiscovering) {
+                    "Scanning nearby hosts..."
+                } else {
+                    "Start discovery to find nearby hosts."
+                }
+                EmptyState(
+                    message = emptyMessage,
+                    actionLabel = if (!isDiscovering && !discoveryBlockedByConnection) "Start discovery" else null,
+                    onAction = if (!isDiscovering && !discoveryBlockedByConnection) onStartDiscovery else null,
+                )
             }
         } else {
             items(discoveredDevices, key = { "discovered-${it.address}" }) { device ->
@@ -215,34 +260,61 @@ private fun DeviceRow(
     onConnect: (HostDevice) -> Unit,
     onForget: (() -> Unit)? = null,
 ) {
-    AppCard(modifier = Modifier.fillMaxWidth()) {
+    AppCard(
+        modifier = Modifier.fillMaxWidth(),
+        variant = AppCardVariant.Interactive,
+    ) {
         Column(
             modifier = Modifier
                 .fillMaxWidth()
                 .padding(UiTokens.CardPadding),
-            verticalArrangement = Arrangement.spacedBy(8.dp),
+            verticalArrangement = Arrangement.spacedBy(UiTokens.Space2),
         ) {
-            Text(device.name, style = MaterialTheme.typography.titleMedium)
-            Text(device.address, style = MaterialTheme.typography.labelSmall)
+            SectionHeader(
+                title = device.name,
+                subtitle = device.connectionLabel(),
+            )
+            Text(
+                text = device.address,
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
             FlowRow(
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
-                verticalArrangement = Arrangement.spacedBy(8.dp),
+                horizontalArrangement = Arrangement.spacedBy(UiTokens.Space2),
+                verticalArrangement = Arrangement.spacedBy(UiTokens.Space2),
             ) {
                 if (!device.bonded) {
-                    Button(onClick = { onPair(device) }) {
+                    AppButton(
+                        onClick = { onPair(device) },
+                        variant = AppButtonVariant.Primary,
+                    ) {
                         Text("Pair")
                     }
                 } else {
-                    Button(onClick = { onConnect(device) }) {
+                    AppButton(
+                        onClick = { onConnect(device) },
+                        variant = AppButtonVariant.Primary,
+                    ) {
                         Text(if (device.connected) "Reconnect" else "Connect")
                     }
                 }
                 onForget?.let {
-                    OutlinedButton(onClick = it) {
+                    AppButton(
+                        onClick = it,
+                        variant = AppButtonVariant.Secondary,
+                    ) {
                         Text("Forget")
                     }
                 }
             }
         }
+    }
+}
+
+private fun HostDevice.connectionLabel(): String {
+    return when {
+        connected -> "Connected"
+        bonded -> "Bonded"
+        else -> "Available"
     }
 }
