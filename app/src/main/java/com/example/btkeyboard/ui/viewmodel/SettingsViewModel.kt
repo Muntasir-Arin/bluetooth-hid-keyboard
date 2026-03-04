@@ -16,10 +16,6 @@ class SettingsViewModel(
         controller.updateAutoReconnect(enabled)
     }
 
-    fun setForegroundPersistence(enabled: Boolean) {
-        controller.updateForegroundPersistence(enabled)
-    }
-
     fun setPointerSensitivity(value: Float) {
         controller.updatePointerSensitivity(value)
     }

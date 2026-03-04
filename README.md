@@ -9,7 +9,7 @@ Android app that turns a phone into a Bluetooth HID keyboard for host devices (W
 - Regular Android soft keyboard input forwarding via HID reports
 - Compact special key panel: navigation, function keys, modifiers, media keys
 - Dedicated on-screen trackpad with tap-to-click, left/right buttons, and two-finger scroll
-- Foreground service persistence with notification
+- Smart idle foreground service lifecycle (lazy start, connected keep-alive, background idle auto-stop)
 - Auto reconnect to last connected trusted host
 - Trusted device and settings persistence via DataStore
 - One-time mandatory re-pair flow when HID descriptor version changes

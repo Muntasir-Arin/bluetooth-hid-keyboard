@@ -64,7 +64,6 @@ import com.example.btkeyboard.util.DiagnosticsExporter
 class MainActivity : ComponentActivity() {
 
     private var pendingPermissionAction: (() -> Unit)? = null
-    private var foregroundPersistenceEnabled: Boolean = true
 
     private val permissionLauncher = registerForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions(),
@@ -81,7 +80,6 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        requestStartupPermissionsAndStartService()
 
         setContent {
             val app = application as BtKeyboardApplication
@@ -103,8 +101,6 @@ class MainActivity : ComponentActivity() {
             val pressedButtons by trackpadViewModel.pressedMouseButtons.collectAsStateWithLifecycle()
             val settings by settingsViewModel.settings.collectAsStateWithLifecycle()
             val diagnostics by settingsViewModel.diagnostics.collectAsStateWithLifecycle()
-
-            foregroundPersistenceEnabled = settings.foregroundPersistence
 
             val navController = rememberNavController()
             val navEntry by navController.currentBackStackEntryAsState()
@@ -148,7 +144,7 @@ class MainActivity : ComponentActivity() {
                             showRepairDialog = false
                             devicesViewModel.acknowledgeHostRepair()
                             pendingRepairConnect?.let { device ->
-                                withPermissions(BluetoothPermissionHelper.connectPermissions()) {
+                                withServiceForBluetoothAction(BluetoothPermissionHelper.connectPermissions()) {
                                     devicesViewModel.connect(device)
                                 }
                             }
@@ -207,7 +203,7 @@ class MainActivity : ComponentActivity() {
                                 discoveredDevices = discoveredDevices,
                                 requiresHostRepair = requiresHostRepair,
                                 onStartDiscovery = {
-                                    withPermissions(BluetoothPermissionHelper.scanPermissions()) {
+                                    withServiceForBluetoothAction(BluetoothPermissionHelper.scanPermissions()) {
                                         devicesViewModel.startDiscovery()
                                     }
                                 },
@@ -222,7 +218,7 @@ class MainActivity : ComponentActivity() {
                                     }
                                 },
                                 onConnect = { device ->
-                                    withPermissions(BluetoothPermissionHelper.connectPermissions()) {
+                                    withServiceForBluetoothAction(BluetoothPermissionHelper.connectPermissions()) {
                                         if (requiresHostRepair) {
                                             pendingRepairConnect = device
                                             showRepairDialog = true
@@ -232,7 +228,7 @@ class MainActivity : ComponentActivity() {
                                     }
                                 },
                                 onDisconnect = {
-                                    withPermissions(BluetoothPermissionHelper.connectPermissions()) {
+                                    withServiceForBluetoothAction(BluetoothPermissionHelper.connectPermissions()) {
                                         devicesViewModel.disconnect()
                                     }
                                 },
@@ -247,9 +243,21 @@ class MainActivity : ComponentActivity() {
                                 inputText = keyboardViewModel.inputText,
                                 unsupportedCharCount = unsupportedCount,
                                 activeModifiers = activeModifiers,
-                                onInputChanged = keyboardViewModel::onInputTextChanged,
-                                onSendSpecial = keyboardViewModel::sendSpecial,
-                                onModifierToggle = keyboardViewModel::toggleModifier,
+                                onInputChanged = { value ->
+                                    withServiceForBluetoothAction(BluetoothPermissionHelper.connectPermissions()) {
+                                        keyboardViewModel.onInputTextChanged(value)
+                                    }
+                                },
+                                onSendSpecial = { key ->
+                                    withServiceForBluetoothAction(BluetoothPermissionHelper.connectPermissions()) {
+                                        keyboardViewModel.sendSpecial(key)
+                                    }
+                                },
+                                onModifierToggle = { key, enabled ->
+                                    withServiceForBluetoothAction(BluetoothPermissionHelper.connectPermissions()) {
+                                        keyboardViewModel.toggleModifier(key, enabled)
+                                    }
+                                },
                                 onClearUnsupportedCount = keyboardViewModel::clearUnsupportedCount,
                                 onClearInput = keyboardViewModel::clearInput,
                             )
@@ -261,20 +269,70 @@ class MainActivity : ComponentActivity() {
                                 pressedButtons = pressedButtons,
                                 sensitivity = settings.pointerSensitivity,
                                 onMove = { dx, dy ->
-                                    trackpadViewModel.movePointer(dx, dy, settings.pointerSensitivity)
+                                    withServiceForBluetoothAction(BluetoothPermissionHelper.connectPermissions()) {
+                                        trackpadViewModel.movePointer(dx, dy, settings.pointerSensitivity)
+                                    }
                                 },
-                                onVerticalScrollSteps = trackpadViewModel::scrollBySteps,
-                                onHorizontalScrollSteps = trackpadViewModel::scrollHorizontallyBySteps,
-                                onTap = trackpadViewModel::tapToClick,
-                                onDoubleTap = trackpadViewModel::doubleTapToDoubleClick,
-                                onTwoFingerTap = trackpadViewModel::twoFingerTapRightClick,
-                                onPinchZoom = trackpadViewModel::pinchZoom,
-                                onThreeFingerSwipeUp = trackpadViewModel::threeFingerSwipeUp,
-                                onThreeFingerSwipeDown = trackpadViewModel::threeFingerSwipeDown,
-                                onThreeFingerSwipeLeft = trackpadViewModel::threeFingerSwipeLeft,
-                                onThreeFingerSwipeRight = trackpadViewModel::threeFingerSwipeRight,
-                                onThreeFingerTap = trackpadViewModel::threeFingerTapLookup,
-                                onButtonPressed = trackpadViewModel::setButtonPressed,
+                                onVerticalScrollSteps = { steps ->
+                                    withServiceForBluetoothAction(BluetoothPermissionHelper.connectPermissions()) {
+                                        trackpadViewModel.scrollBySteps(steps)
+                                    }
+                                },
+                                onHorizontalScrollSteps = { steps ->
+                                    withServiceForBluetoothAction(BluetoothPermissionHelper.connectPermissions()) {
+                                        trackpadViewModel.scrollHorizontallyBySteps(steps)
+                                    }
+                                },
+                                onTap = {
+                                    withServiceForBluetoothAction(BluetoothPermissionHelper.connectPermissions()) {
+                                        trackpadViewModel.tapToClick()
+                                    }
+                                },
+                                onDoubleTap = {
+                                    withServiceForBluetoothAction(BluetoothPermissionHelper.connectPermissions()) {
+                                        trackpadViewModel.doubleTapToDoubleClick()
+                                    }
+                                },
+                                onTwoFingerTap = {
+                                    withServiceForBluetoothAction(BluetoothPermissionHelper.connectPermissions()) {
+                                        trackpadViewModel.twoFingerTapRightClick()
+                                    }
+                                },
+                                onPinchZoom = { zoomIn ->
+                                    withServiceForBluetoothAction(BluetoothPermissionHelper.connectPermissions()) {
+                                        trackpadViewModel.pinchZoom(zoomIn)
+                                    }
+                                },
+                                onThreeFingerSwipeUp = {
+                                    withServiceForBluetoothAction(BluetoothPermissionHelper.connectPermissions()) {
+                                        trackpadViewModel.threeFingerSwipeUp()
+                                    }
+                                },
+                                onThreeFingerSwipeDown = {
+                                    withServiceForBluetoothAction(BluetoothPermissionHelper.connectPermissions()) {
+                                        trackpadViewModel.threeFingerSwipeDown()
+                                    }
+                                },
+                                onThreeFingerSwipeLeft = {
+                                    withServiceForBluetoothAction(BluetoothPermissionHelper.connectPermissions()) {
+                                        trackpadViewModel.threeFingerSwipeLeft()
+                                    }
+                                },
+                                onThreeFingerSwipeRight = {
+                                    withServiceForBluetoothAction(BluetoothPermissionHelper.connectPermissions()) {
+                                        trackpadViewModel.threeFingerSwipeRight()
+                                    }
+                                },
+                                onThreeFingerTap = {
+                                    withServiceForBluetoothAction(BluetoothPermissionHelper.connectPermissions()) {
+                                        trackpadViewModel.threeFingerTapLookup()
+                                    }
+                                },
+                                onButtonPressed = { button, pressed ->
+                                    withServiceForBluetoothAction(BluetoothPermissionHelper.connectPermissions()) {
+                                        trackpadViewModel.setButtonPressed(button, pressed)
+                                    }
+                                },
                             )
                         }
 
@@ -283,7 +341,6 @@ class MainActivity : ComponentActivity() {
                                 settings = settings,
                                 diagnostics = diagnostics,
                                 onAutoReconnectChange = settingsViewModel::setAutoReconnect,
-                                onForegroundPersistenceChange = settingsViewModel::setForegroundPersistence,
                                 onPointerSensitivityChange = settingsViewModel::setPointerSensitivity,
                                 onClearTrustedDevices = settingsViewModel::clearTrustedDevices,
                                 onExportDiagnostics = {
@@ -306,35 +363,27 @@ class MainActivity : ComponentActivity() {
 
     override fun onStart() {
         super.onStart()
-        maybeStartKeyboardService()
+        notifyServiceLifecycle(BluetoothHidForegroundService.ACTION_APP_FOREGROUND)
     }
 
     override fun onStop() {
-        if (!foregroundPersistenceEnabled) {
-            stopKeyboardService()
-        }
+        notifyServiceLifecycle(BluetoothHidForegroundService.ACTION_APP_BACKGROUND)
         super.onStop()
     }
 
-    private fun requestStartupPermissionsAndStartService() {
-        withPermissions(startupPermissions()) {
-            startKeyboardService()
-        }
-    }
-
-    private fun startupPermissions(): Array<String> {
-        return (BluetoothPermissionHelper.connectPermissions().toList() +
+    private fun withServiceForBluetoothAction(
+        bluetoothPermissions: Array<String>,
+        action: () -> Unit,
+    ) {
+        val requiredPermissions = (bluetoothPermissions.toList() +
             BluetoothPermissionHelper.notificationPermissions().toList())
             .distinct()
             .toTypedArray()
-    }
-
-    private fun maybeStartKeyboardService() {
-        val permissions = BluetoothPermissionHelper.connectPermissions()
-        if (permissions.isNotEmpty() && !BluetoothPermissionHelper.hasAll(this, permissions)) {
-            return
+        withPermissions(requiredPermissions) {
+            if (ensureKeyboardServiceRunning()) {
+                action()
+            }
         }
-        startKeyboardService()
     }
 
     private fun withPermissions(permissions: Array<String>, onGranted: () -> Unit) {
@@ -346,23 +395,28 @@ class MainActivity : ComponentActivity() {
         permissionLauncher.launch(permissions)
     }
 
-    private fun startKeyboardService() {
+    private fun ensureKeyboardServiceRunning(): Boolean {
+        if (BluetoothHidForegroundService.isRunning()) {
+            return true
+        }
         val intent = Intent(this, BluetoothHidForegroundService::class.java)
-        runCatching {
+        return runCatching {
             ContextCompat.startForegroundService(this, intent)
+            true
         }.onFailure {
             toast("Unable to start Bluetooth service: ${it.message}")
-        }
+        }.getOrDefault(false)
     }
 
-    private fun stopKeyboardService() {
+    private fun notifyServiceLifecycle(action: String) {
+        if (!BluetoothHidForegroundService.isRunning()) {
+            return
+        }
         val intent = Intent(this, BluetoothHidForegroundService::class.java).apply {
-            action = BluetoothHidForegroundService.ACTION_STOP
+            this.action = action
         }
         runCatching {
             startService(intent)
-        }.onFailure {
-            toast("Unable to stop Bluetooth service: ${it.message}")
         }
     }
 

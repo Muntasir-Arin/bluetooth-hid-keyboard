@@ -1,7 +1,7 @@
 <resources>
     <string name="app_name">Nubloo Bluetooth Keyboard</string>
     <string name="service_channel_name">Nubloo Bluetooth Keyboard Service</string>
-    <string name="service_notification_title">Nubloo Bluetooth Keyboard active</string>
+    <string name="service_notification_title">Nubloo Bluetooth Keyboard service running</string>
     <string name="service_notification_disconnected">No active host</string>
     <string name="service_notification_connected">Connected to %1$s</string>
 </resources>

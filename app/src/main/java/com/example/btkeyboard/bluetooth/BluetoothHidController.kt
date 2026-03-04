@@ -552,13 +552,6 @@ class BluetoothHidController(
         }
     }
 
-    fun updateForegroundPersistence(enabled: Boolean) {
-        scope.launch(commandDispatcher) {
-            settingsStore.updateForegroundPersistence(enabled)
-            logger.log("Foreground persistence set to $enabled")
-        }
-    }
-
     fun updatePointerSensitivity(value: Float) {
         val clamped = value.coerceIn(0.5f, 2.0f)
         scope.launch(commandDispatcher) {

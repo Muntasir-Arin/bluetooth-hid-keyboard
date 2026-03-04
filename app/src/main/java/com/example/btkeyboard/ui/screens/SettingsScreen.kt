@@ -30,7 +30,6 @@ fun SettingsScreen(
     settings: AppSettings,
     diagnostics: List<String>,
     onAutoReconnectChange: (Boolean) -> Unit,
-    onForegroundPersistenceChange: (Boolean) -> Unit,
     onPointerSensitivityChange: (Float) -> Unit,
     onClearTrustedDevices: () -> Unit,
     onExportDiagnostics: () -> Unit,
@@ -58,11 +57,15 @@ fun SettingsScreen(
                         onCheckedChange = onAutoReconnectChange,
                     )
                     HorizontalDivider()
-                    ToggleRow(
-                        title = "Foreground persistence",
-                        subtitle = "Keep service active when app is backgrounded",
-                        checked = settings.foregroundPersistence,
-                        onCheckedChange = onForegroundPersistenceChange,
+                    Text(
+                        text = "Smart idle mode",
+                        fontWeight = FontWeight.SemiBold,
+                    )
+                    Text(
+                        text = "The Bluetooth service starts on demand, stays active while connected, " +
+                            "and stops after 2 minutes in background when disconnected.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                     HorizontalDivider()
                     PointerSensitivityRow(

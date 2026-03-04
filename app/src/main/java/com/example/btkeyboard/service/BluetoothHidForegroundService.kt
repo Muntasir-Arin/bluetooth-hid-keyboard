@@ -16,6 +16,7 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.collectLatest
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withTimeoutOrNull
 
@@ -24,6 +25,9 @@ class BluetoothHidForegroundService : Service() {
     private val serviceScope: CoroutineScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
     private var notificationJob: Job? = null
     private var startupJob: Job? = null
+    private var idleStopJob: Job? = null
+    private var appInForeground: Boolean = true
+    private var latestConnectionState: ConnectionState = ConnectionState.Idle
 
     private val app by lazy { application as BtKeyboardApplication }
     private val controller by lazy { app.hidController }
@@ -37,9 +41,11 @@ class BluetoothHidForegroundService : Service() {
             app.diagnosticsLogger.log("Service startup failed: ${it.message}")
         }.isSuccess
         if (!startupOk) {
+            running = false
             stopSelf()
             return
         }
+        running = true
 
         startupJob = serviceScope.launch {
             controller.registerApp()
@@ -54,6 +60,7 @@ class BluetoothHidForegroundService : Service() {
 
         notificationJob = serviceScope.launch {
             controller.state.collectLatest { state ->
+                latestConnectionState = state
                 val message = when (state) {
                     is ConnectionState.Connected -> getString(
                         R.string.service_notification_connected,
@@ -64,23 +71,38 @@ class BluetoothHidForegroundService : Service() {
                 }
                 val manager = getSystemService(NotificationManager::class.java)
                 manager.notify(NOTIFICATION_ID, buildNotification(message))
+                reevaluateIdleStopPolicy()
             }
         }
+        reevaluateIdleStopPolicy()
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        if (intent?.action == ACTION_STOP) {
-            stopSelf()
-            return START_NOT_STICKY
+        when (intent?.action) {
+            ACTION_STOP -> {
+                stopSelf()
+                return START_NOT_STICKY
+            }
+
+            ACTION_APP_FOREGROUND -> {
+                appInForeground = true
+            }
+
+            ACTION_APP_BACKGROUND -> {
+                appInForeground = false
+            }
         }
-        return START_STICKY
+        reevaluateIdleStopPolicy()
+        return START_NOT_STICKY
     }
 
     override fun onBind(intent: Intent?): IBinder = LocalBinder()
 
     override fun onDestroy() {
+        running = false
         notificationJob?.cancel()
         startupJob?.cancel()
+        idleStopJob?.cancel()
         serviceScope.launch(Dispatchers.IO) {
             withTimeoutOrNull(SERVICE_SHUTDOWN_TIMEOUT_MS) {
                 controller.unregisterApp()
@@ -110,6 +132,35 @@ class BluetoothHidForegroundService : Service() {
             .build()
     }
 
+    private fun reevaluateIdleStopPolicy() {
+        if (ServiceIdlePolicy.shouldArmIdleTimer(appInForeground = appInForeground, state = latestConnectionState)) {
+            armIdleTimer()
+        } else {
+            cancelIdleTimer()
+        }
+    }
+
+    private fun armIdleTimer() {
+        idleStopJob?.cancel()
+        idleStopJob = serviceScope.launch {
+            delay(IDLE_TIMEOUT_MS)
+            if (!ServiceIdlePolicy.shouldArmIdleTimer(appInForeground = appInForeground, state = latestConnectionState)) {
+                return@launch
+            }
+            runCatching {
+                controller.stopDiscovery()
+            }.onFailure {
+                app.diagnosticsLogger.log("Failed to stop discovery during idle shutdown: ${it.message}")
+            }
+            stopSelf()
+        }
+    }
+
+    private fun cancelIdleTimer() {
+        idleStopJob?.cancel()
+        idleStopJob = null
+    }
+
     inner class LocalBinder : android.os.Binder() {
         fun service(): BluetoothHidForegroundService = this@BluetoothHidForegroundService
     }
@@ -118,6 +169,13 @@ class BluetoothHidForegroundService : Service() {
         const val CHANNEL_ID = "bt_keyboard_service"
         const val NOTIFICATION_ID = 2001
         const val ACTION_STOP = "com.example.btkeyboard.action.STOP_SERVICE"
+        const val ACTION_APP_FOREGROUND = "com.example.btkeyboard.action.APP_FOREGROUND"
+        const val ACTION_APP_BACKGROUND = "com.example.btkeyboard.action.APP_BACKGROUND"
+        @Volatile
+        private var running: Boolean = false
         private const val SERVICE_SHUTDOWN_TIMEOUT_MS = 2_000L
+        private const val IDLE_TIMEOUT_MS = 120_000L
+
+        fun isRunning(): Boolean = running
     }
 }

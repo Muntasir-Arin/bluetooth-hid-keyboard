@@ -35,7 +35,6 @@ class DataStoreDeviceStore(
         .map { prefs ->
             AppSettings(
                 autoReconnect = prefs[Keys.AUTO_RECONNECT] ?: true,
-                foregroundPersistence = prefs[Keys.FOREGROUND_PERSISTENCE] ?: true,
                 pointerSensitivity = prefs[Keys.POINTER_SENSITIVITY] ?: 1.0f,
                 acknowledgedHidDescriptorVersion = prefs[Keys.ACK_HID_DESCRIPTOR_VERSION]
                     ?: if (hasLegacyPairingData(prefs)) LEGACY_HID_DESCRIPTOR_VERSION else CURRENT_HID_DESCRIPTOR_VERSION,
@@ -92,12 +91,6 @@ class DataStoreDeviceStore(
         }
     }
 
-    override suspend fun updateForegroundPersistence(enabled: Boolean) {
-        context.btKeyboardDataStore.edit { prefs ->
-            prefs[Keys.FOREGROUND_PERSISTENCE] = enabled
-        }
-    }
-
     override suspend fun updatePointerSensitivity(value: Float) {
         context.btKeyboardDataStore.edit { prefs ->
             prefs[Keys.POINTER_SENSITIVITY] = value
@@ -127,7 +120,6 @@ class DataStoreDeviceStore(
         val TRUSTED = stringSetPreferencesKey("trusted_devices")
         val LAST_CONNECTED = stringPreferencesKey("last_connected")
         val AUTO_RECONNECT = booleanPreferencesKey("auto_reconnect")
-        val FOREGROUND_PERSISTENCE = booleanPreferencesKey("foreground_persistence")
         val POINTER_SENSITIVITY = floatPreferencesKey("pointer_sensitivity")
         val ACK_HID_DESCRIPTOR_VERSION = intPreferencesKey("ack_hid_descriptor_version")
     }
