@@ -61,6 +61,7 @@ class BluetoothHidController(
         failureThreshold = PROFILE_FAILURE_THRESHOLD,
         nowProvider = { SystemClock.elapsedRealtime() },
     )
+    private val registrationReconciler = RegistrationSubmissionReconciler()
 
     private val bluetoothAdapter: BluetoothAdapter? =
         context.getSystemService(BluetoothManager::class.java)?.adapter
@@ -248,6 +249,9 @@ class BluetoothHidController(
         }
         if (!adapter.isEnabled) {
             return@withContext errorResult(ErrorCode.BLUETOOTH_DISABLED, "Enable Bluetooth first.")
+        }
+        DiscoveryPolicy.blockedReason(_state.value)?.let { blockedReason ->
+            return@withContext discoveryFailure(blockedReason)
         }
         if (!isLocationReadyForClassicDiscovery()) {
             return@withContext discoveryFailure(
@@ -642,6 +646,20 @@ class BluetoothHidController(
         )
 
         if (!submitted) {
+            val reconciled = registrationReconciler.awaitCallbackConfirmation(
+                graceMs = REGISTRATION_CALLBACK_GRACE_MS,
+                isRegistered = { appRegistered.get() },
+            )
+            logger.log(
+                "HID register reconciliation: submitted=false " +
+                    "callback-confirmed=${reconciled.callbackConfirmed} waitMs=${reconciled.waitMs}",
+            )
+            if (reconciled.callbackConfirmed) {
+                logger.log(
+                    "Warn(${ErrorCode.REGISTRATION_FAILED}): registerApp returned false but callback confirmed registration.",
+                )
+                return Result.success(Unit)
+            }
             return errorResult(
                 ErrorCode.REGISTRATION_FAILED,
                 "HID app registration command was rejected.",
@@ -1169,6 +1187,7 @@ class BluetoothHidController(
         private const val PROFILE_PROXY_TIMEOUT_MS = 8_000L
         private const val PROFILE_FAILURE_THRESHOLD = 2
         private const val PROFILE_FAILURE_COOLDOWN_MS = 30_000L
-        private const val POINTER_STATS_LOG_EVERY = 120L
+        private const val REGISTRATION_CALLBACK_GRACE_MS = 750L
+        private const val POINTER_STATS_LOG_EVERY = 1200L
     }
 }

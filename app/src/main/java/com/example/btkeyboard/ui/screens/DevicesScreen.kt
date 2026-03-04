@@ -48,6 +48,8 @@ fun DevicesScreen(
     modifier: Modifier = Modifier,
 ) {
     val isDiscovering = connectionState is ConnectionState.Discovering
+    val discoveryBlockedByConnection =
+        connectionState is ConnectionState.Connected || connectionState is ConnectionState.Connecting
 
     LazyColumn(
         modifier = modifier.fillMaxSize(),
@@ -75,7 +77,10 @@ fun DevicesScreen(
                                 Text("Stop Discovery")
                             }
                         } else {
-                            Button(onClick = onStartDiscovery) {
+                            Button(
+                                onClick = onStartDiscovery,
+                                enabled = !discoveryBlockedByConnection,
+                            ) {
                                 Text("Start Discovery")
                             }
                         }
@@ -90,6 +95,13 @@ fun DevicesScreen(
                                 Text("Disconnect")
                             }
                         }
+                    }
+                    if (discoveryBlockedByConnection) {
+                        Text(
+                            text = "Discovery is unavailable while connected. Disconnect first or use Bonded devices.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
                     }
                     if (hidCapability == HidCapability.UNAVAILABLE) {
                         Text(
