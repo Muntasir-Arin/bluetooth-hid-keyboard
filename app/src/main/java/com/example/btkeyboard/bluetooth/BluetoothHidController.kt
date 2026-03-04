@@ -13,29 +13,37 @@ import android.content.Intent
 import android.content.IntentFilter
 import android.location.LocationManager
 import android.os.Build
+import android.os.SystemClock
 import com.example.btkeyboard.data.AppSettingsStore
 import com.example.btkeyboard.data.DeviceStore
 import com.example.btkeyboard.model.ConnectionState
 import com.example.btkeyboard.model.ErrorCode
+import com.example.btkeyboard.model.HidCapability
 import com.example.btkeyboard.model.HostDevice
 import com.example.btkeyboard.model.KeyAction
 import com.example.btkeyboard.model.ModifierKey
 import com.example.btkeyboard.model.MouseButton
 import com.example.btkeyboard.util.BluetoothPermissionHelper
 import com.example.btkeyboard.util.DiagnosticsLogger
+import java.util.concurrent.atomic.AtomicBoolean
+import kotlin.coroutines.resume
+import kotlin.coroutines.resumeWithException
+import kotlin.math.roundToInt
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
-import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
-import kotlin.math.roundToInt
-import java.util.concurrent.CountDownLatch
-import java.util.concurrent.TimeUnit
-import java.util.concurrent.atomic.AtomicBoolean
+import kotlinx.coroutines.suspendCancellableCoroutine
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeout
 
 class BluetoothHidController(
     private val context: Context,
@@ -45,6 +53,14 @@ class BluetoothHidController(
     private val scope: CoroutineScope,
     private val encoder: HidReportEncoder = HidReportEncoder(),
 ) : HidTransport {
+
+    private val commandDispatcher = Dispatchers.IO.limitedParallelism(1)
+    private val profileProxyMutex = Mutex()
+    private val profileCircuitBreaker = ProfileProxyCircuitBreaker(
+        cooldownMs = PROFILE_FAILURE_COOLDOWN_MS,
+        failureThreshold = PROFILE_FAILURE_THRESHOLD,
+        nowProvider = { SystemClock.elapsedRealtime() },
+    )
 
     private val bluetoothAdapter: BluetoothAdapter? =
         context.getSystemService(BluetoothManager::class.java)?.adapter
@@ -57,12 +73,21 @@ class BluetoothHidController(
     private val _pressedMouseButtons = MutableStateFlow<Set<MouseButton>>(emptySet())
     private val _unsupportedCharCount = MutableStateFlow(0)
     private val _acknowledgedDescriptorVersionOverride = MutableStateFlow<Int?>(null)
+    private val _hidCapability = MutableStateFlow(HidCapability.UNKNOWN)
 
+    @Volatile
     private var hidDevice: BluetoothHidDevice? = null
+
+    @Volatile
     private var connectedDevice: BluetoothDevice? = null
+
     private val appRegistered = AtomicBoolean(false)
     private var lastProfileProxyErrorCode: ErrorCode = ErrorCode.PROFILE_UNAVAILABLE
     private var lastProfileProxyErrorMessage: String = "Unable to acquire HID profile proxy."
+
+    private var pointerSampleCount: Long = 0
+    private var pointerBatchCount: Long = 0
+    private var pointerReportCount: Long = 0
 
     val discoveredDevices: StateFlow<List<HostDevice>> = _discoveredDevices.asStateFlow()
     val bondedDevices: StateFlow<List<HostDevice>> = _bondedDevices.asStateFlow()
@@ -70,6 +95,7 @@ class BluetoothHidController(
     val activeModifiers: StateFlow<Set<ModifierKey>> = _activeModifiers.asStateFlow()
     val pressedMouseButtons: StateFlow<Set<MouseButton>> = _pressedMouseButtons.asStateFlow()
     val unsupportedCharCount: StateFlow<Int> = _unsupportedCharCount.asStateFlow()
+    val hidCapability: StateFlow<HidCapability> = _hidCapability.asStateFlow()
     val settings = settingsStore.settings.stateIn(
         scope,
         started = SharingStarted.Eagerly,
@@ -108,7 +134,7 @@ class BluetoothHidController(
                     val host = device.toHostDevice(connected = true)
                     _state.value = ConnectionState.Connected(host, latencyMs = 0)
                     logger.log("Connected to ${host.name} (${host.address})")
-                    scope.launch {
+                    scope.launch(commandDispatcher) {
                         deviceStore.saveTrusted(host)
                         deviceStore.saveLastConnected(host.address)
                         refreshTrustedDevices()
@@ -133,7 +159,7 @@ class BluetoothHidController(
                     logger.log("Disconnecting from ${device.address}")
                 }
             }
-            refreshBondedDevices()
+            refreshBondedDevicesAsync()
         }
 
         override fun onSetProtocol(device: BluetoothDevice, protocol: Byte) {
@@ -176,18 +202,19 @@ class BluetoothHidController(
                 }
 
                 BluetoothDevice.ACTION_BOND_STATE_CHANGED -> {
-                    refreshBondedDevices()
+                    refreshBondedDevicesAsync()
                 }
 
                 BluetoothAdapter.ACTION_STATE_CHANGED -> {
                     val state = intent.getIntExtra(BluetoothAdapter.EXTRA_STATE, BluetoothAdapter.ERROR)
-                    if (state == BluetoothAdapter.STATE_OFF) {
-                        appRegistered.set(false)
-                        connectedDevice = null
-                        _state.value = ConnectionState.Error(
-                            code = ErrorCode.BLUETOOTH_DISABLED,
-                            message = "Bluetooth is off. Enable Bluetooth and retry.",
-                        )
+                    when (state) {
+                        BluetoothAdapter.STATE_OFF -> {
+                            onBluetoothTurnedOff()
+                        }
+
+                        BluetoothAdapter.STATE_ON -> {
+                            onBluetoothTurnedOn()
+                        }
                     }
                 }
             }
@@ -195,8 +222,8 @@ class BluetoothHidController(
     }
 
     init {
-        refreshBondedDevices()
-        scope.launch { refreshTrustedDevices() }
+        scope.launch(commandDispatcher) { refreshBondedDevicesInternal() }
+        scope.launch(commandDispatcher) { refreshTrustedDevices() }
         registerReceivers()
     }
 
@@ -210,22 +237,20 @@ class BluetoothHidController(
         return runCatching { bluetoothAdapter?.isEnabled == true }.getOrDefault(false)
     }
 
-    fun isHidDeviceSupported(): Boolean = Build.VERSION.SDK_INT >= Build.VERSION_CODES.P
-
     @SuppressLint("MissingPermission")
-    fun startDiscovery(): Result<Unit> {
-        val adapter = bluetoothAdapter ?: return errorResult(
+    suspend fun startDiscovery(): Result<Unit> = withContext(commandDispatcher) {
+        val adapter = bluetoothAdapter ?: return@withContext errorResult(
             ErrorCode.BLUETOOTH_UNAVAILABLE,
             "Bluetooth adapter is unavailable.",
         )
         if (!hasScanPermission()) {
-            return discoveryFailure("Scan permission is required.")
+            return@withContext discoveryFailure("Scan permission is required.")
         }
         if (!adapter.isEnabled) {
-            return errorResult(ErrorCode.BLUETOOTH_DISABLED, "Enable Bluetooth first.")
+            return@withContext errorResult(ErrorCode.BLUETOOTH_DISABLED, "Enable Bluetooth first.")
         }
         if (!isLocationReadyForClassicDiscovery()) {
-            return discoveryFailure(
+            return@withContext discoveryFailure(
                 "Location services must be enabled for discovery on this Android version. " +
                     "Or pair in system settings and use Bonded devices.",
             )
@@ -234,14 +259,14 @@ class BluetoothHidController(
         if (adapter.isDiscovering) {
             logger.log("Bluetooth discovery already running")
             _state.value = ConnectionState.Discovering
-            return Result.success(Unit)
+            return@withContext Result.success(Unit)
         }
 
         val started = runCatching {
             _discoveredDevices.value = emptyList()
             adapter.startDiscovery()
         }.getOrElse {
-            return discoveryFailure(
+            return@withContext discoveryFailure(
                 "Unable to start discovery: ${it.message}. " +
                     "You can still pair via system Bluetooth settings.",
             )
@@ -262,18 +287,18 @@ class BluetoothHidController(
                     }
                 }
             }
-            return discoveryFailure(hint)
+            return@withContext discoveryFailure(hint)
         }
 
         logger.log("Bluetooth discovery started")
         _state.value = ConnectionState.Discovering
-        return Result.success(Unit)
+        Result.success(Unit)
     }
 
     @SuppressLint("MissingPermission")
-    fun stopDiscovery() {
-        val adapter = bluetoothAdapter ?: return
-        if (!hasScanPermission()) return
+    suspend fun stopDiscovery() = withContext(commandDispatcher) {
+        val adapter = bluetoothAdapter ?: return@withContext
+        if (!hasScanPermission()) return@withContext
         if (adapter.isDiscovering) {
             adapter.cancelDiscovery()
             logger.log("Bluetooth discovery cancelled")
@@ -283,16 +308,16 @@ class BluetoothHidController(
         }
     }
 
-    fun pair(device: HostDevice): Result<Unit> {
-        val adapter = bluetoothAdapter ?: return errorResult(
+    suspend fun pair(device: HostDevice): Result<Unit> = withContext(commandDispatcher) {
+        val adapter = bluetoothAdapter ?: return@withContext errorResult(
             ErrorCode.BLUETOOTH_UNAVAILABLE,
             "Bluetooth adapter is unavailable.",
         )
         if (!hasConnectPermission()) {
-            return errorResult(ErrorCode.PERMISSION_DENIED, "Connect permission is required.")
+            return@withContext errorResult(ErrorCode.PERMISSION_DENIED, "Connect permission is required.")
         }
 
-        return runCatching {
+        runCatching {
             val remote = adapter.getRemoteDevice(device.address)
             _state.value = ConnectionState.Pairing(device)
             @SuppressLint("MissingPermission")
@@ -310,14 +335,282 @@ class BluetoothHidController(
         }
     }
 
-    override fun registerApp(): Result<Unit> {
-        if (!isHidDeviceSupported()) {
-            return errorResult(
-                ErrorCode.HID_UNSUPPORTED,
-                "HID device profile is not supported on this Android version.",
+    override suspend fun registerApp(): Result<Unit> = withContext(commandDispatcher) {
+        val startedAt = SystemClock.elapsedRealtime()
+        val result = registerAppInternal()
+        val elapsedMs = SystemClock.elapsedRealtime() - startedAt
+        if (result.isSuccess) {
+            logger.log("HID register app completed in ${elapsedMs}ms")
+        } else {
+            logger.log("HID register app failed in ${elapsedMs}ms")
+        }
+        result
+    }
+
+    override suspend fun unregisterApp(): Result<Unit> = withContext(commandDispatcher) {
+        unregisterAppInternal()
+    }
+
+    override suspend fun connect(device: HostDevice): Result<Unit> = withContext(commandDispatcher) {
+        connectInternal(device)
+    }
+
+    override suspend fun disconnect(): Result<Unit> = withContext(commandDispatcher) {
+        if (!hasConnectPermission()) {
+            return@withContext errorResult(ErrorCode.PERMISSION_DENIED, "Connect permission is required.")
+        }
+
+        val profile = hidDevice ?: return@withContext Result.success(Unit)
+        val device = connectedDevice ?: return@withContext Result.success(Unit)
+
+        @SuppressLint("MissingPermission")
+        val submitted = profile.disconnect(device)
+        if (!submitted) {
+            return@withContext errorResult(ErrorCode.CONNECTION_FAILED, "Disconnect request failed.")
+        }
+
+        logger.log("Disconnect requested for ${device.address}")
+        _activeModifiers.value = emptySet()
+        _pressedMouseButtons.value = emptySet()
+        Result.success(Unit)
+    }
+
+    override suspend fun send(action: KeyAction): Result<Unit> = withContext(commandDispatcher) {
+        if (!hasConnectPermission()) {
+            return@withContext nonStateFailure(ErrorCode.PERMISSION_DENIED, "Connect permission is required.")
+        }
+        if (connectedDevice == null) {
+            return@withContext nonStateFailure(
+                ErrorCode.CONNECTION_FAILED,
+                "No connected host device. Connect a device first.",
             )
         }
 
+        if (action is KeyAction.ModifierToggle) {
+            val updated = _activeModifiers.value.toMutableSet()
+            if (action.enabled) {
+                updated += action.key
+            } else {
+                updated -= action.key
+            }
+            _activeModifiers.value = updated
+            return@withContext sendModifierOnlyReport()
+        }
+
+        val encoded = encoder.encode(action, _activeModifiers.value)
+        if (encoded.unmappedCount > 0) {
+            _unsupportedCharCount.value += encoded.unmappedCount
+            logger.log("Skipped ${encoded.unmappedCount} unmapped characters")
+        }
+
+        sendReportsNonState(encoded.reports)
+    }
+
+    suspend fun sendPointerMove(
+        dxPx: Float,
+        dyPx: Float,
+        sensitivity: Float,
+        sourceSamples: Int = 1,
+    ): Result<Unit> = withContext(commandDispatcher) {
+        val dx = (dxPx * sensitivity).roundToInt()
+        val dy = (dyPx * sensitivity).roundToInt()
+        if (dx == 0 && dy == 0) {
+            return@withContext Result.success(Unit)
+        }
+        val reports = encoder.encodeMouseMove(
+            dx = dx,
+            dy = dy,
+            buttonsMask = mouseButtonsMask(),
+        )
+        updatePointerQueueStats(sourceSamples = sourceSamples, reportsSent = reports.size)
+        sendReportsNonState(reports)
+    }
+
+    suspend fun sendVerticalScroll(steps: Int): Result<Unit> = withContext(commandDispatcher) {
+        if (steps == 0) {
+            return@withContext Result.success(Unit)
+        }
+        val reports = encoder.encodeMouseScroll(
+            wheel = steps,
+            buttonsMask = mouseButtonsMask(),
+        )
+        sendReportsNonState(reports)
+    }
+
+    suspend fun sendHorizontalScroll(steps: Int): Result<Unit> = withContext(commandDispatcher) {
+        if (steps == 0) {
+            return@withContext Result.success(Unit)
+        }
+        sendMouseScrollWithTemporaryModifiers(
+            steps = steps,
+            requiredModifiers = setOf(ModifierKey.SHIFT),
+        )
+    }
+
+    suspend fun sendZoom(zoomIn: Boolean): Result<Unit> = withContext(commandDispatcher) {
+        val wheelSteps = if (zoomIn) 1 else -1
+        sendMouseScrollWithTemporaryModifiers(
+            steps = wheelSteps,
+            requiredModifiers = setOf(ModifierKey.CTRL),
+        )
+    }
+
+    suspend fun setMouseButton(button: MouseButton, pressed: Boolean): Result<Unit> = withContext(commandDispatcher) {
+        val current = _pressedMouseButtons.value
+        if ((button in current) == pressed) {
+            return@withContext Result.success(Unit)
+        }
+        val updated = current.toMutableSet().apply {
+            if (pressed) {
+                add(button)
+            } else {
+                remove(button)
+            }
+        }.toSet()
+        _pressedMouseButtons.value = updated
+        val sendResult = sendReportsNonState(listOf(encoder.mouseStateReport(mouseButtonsMask(updated))))
+        if (sendResult.isFailure) {
+            _pressedMouseButtons.value = current
+        }
+        sendResult
+    }
+
+    suspend fun clickMouseButton(button: MouseButton): Result<Unit> = withContext(commandDispatcher) {
+        if (button in _pressedMouseButtons.value) {
+            return@withContext Result.success(Unit)
+        }
+        setMouseButton(button, pressed = true).getOrElse { return@withContext Result.failure(it) }
+        setMouseButton(button, pressed = false)
+    }
+
+    suspend fun doubleClickMouseButton(button: MouseButton): Result<Unit> = withContext(commandDispatcher) {
+        clickMouseButton(button).getOrElse { return@withContext Result.failure(it) }
+        clickMouseButton(button)
+    }
+
+    suspend fun shortcutTaskView(): Result<Unit> = withContext(commandDispatcher) {
+        sendKeyboardShortcut(
+            usage = KEY_USAGE_TAB,
+            modifiers = setOf(ModifierKey.META),
+        )
+    }
+
+    suspend fun shortcutShowDesktop(): Result<Unit> = withContext(commandDispatcher) {
+        sendKeyboardShortcut(
+            usage = KEY_USAGE_D,
+            modifiers = setOf(ModifierKey.META),
+        )
+    }
+
+    suspend fun shortcutSwitchApp(next: Boolean): Result<Unit> = withContext(commandDispatcher) {
+        val modifiers = if (next) {
+            setOf(ModifierKey.ALT)
+        } else {
+            setOf(ModifierKey.ALT, ModifierKey.SHIFT)
+        }
+        sendKeyboardShortcut(
+            usage = KEY_USAGE_TAB,
+            modifiers = modifiers,
+        )
+    }
+
+    suspend fun shortcutLookup(): Result<Unit> = withContext(commandDispatcher) {
+        sendKeyboardShortcut(
+            usage = KEY_USAGE_F,
+            modifiers = setOf(ModifierKey.CTRL),
+        )
+    }
+
+    fun acknowledgeHidDescriptorMigration() {
+        _acknowledgedDescriptorVersionOverride.value = CURRENT_HID_DESCRIPTOR_VERSION
+        scope.launch(commandDispatcher) {
+            settingsStore.updateAcknowledgedHidDescriptorVersion(CURRENT_HID_DESCRIPTOR_VERSION)
+            logger.log("HID descriptor migration acknowledged")
+        }
+    }
+
+    fun forgetTrustedDevice(address: String) {
+        scope.launch(commandDispatcher) {
+            deviceStore.removeTrusted(address)
+            refreshTrustedDevices()
+            logger.log("Trusted device removed: $address")
+        }
+    }
+
+    fun clearTrustedDevices() {
+        scope.launch(commandDispatcher) {
+            deviceStore.clearAll()
+            refreshTrustedDevices()
+            logger.log("Cleared all trusted devices")
+        }
+    }
+
+    fun updateAutoReconnect(enabled: Boolean) {
+        scope.launch(commandDispatcher) {
+            settingsStore.updateAutoReconnect(enabled)
+            logger.log("Auto reconnect set to $enabled")
+        }
+    }
+
+    fun updateForegroundPersistence(enabled: Boolean) {
+        scope.launch(commandDispatcher) {
+            settingsStore.updateForegroundPersistence(enabled)
+            logger.log("Foreground persistence set to $enabled")
+        }
+    }
+
+    fun updatePointerSensitivity(value: Float) {
+        val clamped = value.coerceIn(0.5f, 2.0f)
+        scope.launch(commandDispatcher) {
+            settingsStore.updatePointerSensitivity(clamped)
+            logger.log("Pointer sensitivity set to $clamped")
+        }
+    }
+
+    suspend fun attemptAutoReconnect() = withContext(commandDispatcher) {
+        if (requiresHostRepairNow()) {
+            logger.log("Auto reconnect skipped: host re-pair required after descriptor update")
+            return@withContext
+        }
+        val appSettings = settings.value
+        if (!appSettings.autoReconnect) {
+            logger.log("Auto reconnect disabled")
+            return@withContext
+        }
+        val last = deviceStore.getLastConnected() ?: return@withContext
+        val adapter = bluetoothAdapter ?: return@withContext
+        if (!hasConnectPermission()) {
+            logger.log("Auto reconnect skipped: missing connect permission")
+            return@withContext
+        }
+        runCatching {
+            val remote = adapter.getRemoteDevice(last)
+            @SuppressLint("MissingPermission")
+            val bonded = remote.bondState == BluetoothDevice.BOND_BONDED
+            if (!bonded) {
+                logger.log("Auto reconnect skipped: last device is not bonded")
+                return@runCatching
+            }
+            connectInternal(remote.toHostDevice(connected = false))
+                .exceptionOrNull()
+                ?.let { throw it }
+        }.onFailure {
+            logger.log("Auto reconnect failed: ${it.message}")
+        }
+    }
+
+    fun clearUnsupportedCount() {
+        _unsupportedCharCount.value = 0
+    }
+
+    fun refreshKnownDevices() {
+        scope.launch(commandDispatcher) {
+            refreshBondedDevicesInternal()
+            refreshTrustedDevices()
+        }
+    }
+
+    private suspend fun registerAppInternal(): Result<Unit> {
         val adapter = bluetoothAdapter ?: return errorResult(
             ErrorCode.BLUETOOTH_UNAVAILABLE,
             "Bluetooth adapter is unavailable.",
@@ -366,7 +659,7 @@ class BluetoothHidController(
         return Result.success(Unit)
     }
 
-    override fun unregisterApp(): Result<Unit> {
+    private suspend fun unregisterAppInternal(): Result<Unit> {
         val profile = hidDevice ?: return Result.success(Unit)
         if (!hasConnectPermission()) {
             return errorResult(ErrorCode.PERMISSION_DENIED, "Connect permission is required.")
@@ -386,7 +679,7 @@ class BluetoothHidController(
     }
 
     @SuppressLint("MissingPermission")
-    override fun connect(device: HostDevice): Result<Unit> {
+    private suspend fun connectInternal(device: HostDevice): Result<Unit> {
         if (requiresHostRepairNow()) {
             return errorResult(
                 ErrorCode.REPAIR_REQUIRED,
@@ -411,11 +704,12 @@ class BluetoothHidController(
         )
 
         if (!appRegistered.get()) {
-            registerApp().getOrElse {
+            registerAppInternal().getOrElse {
                 return Result.failure(it)
             }
         }
 
+        val startedAt = SystemClock.elapsedRealtime()
         return runCatching {
             val remote = adapter.getRemoteDevice(device.address)
             @SuppressLint("MissingPermission")
@@ -446,263 +740,18 @@ class BluetoothHidController(
                 code = ErrorCode.CONNECTION_FAILED,
                 message = "Connect failed: ${it.message}",
             )
+        }.also {
+            val elapsedMs = SystemClock.elapsedRealtime() - startedAt
+            if (it.isSuccess) {
+                logger.log("Connect command submitted in ${elapsedMs}ms")
+            } else {
+                logger.log("Connect command failed in ${elapsedMs}ms")
+            }
         }
-    }
-
-    override fun disconnect(): Result<Unit> {
-        if (!hasConnectPermission()) {
-            return errorResult(ErrorCode.PERMISSION_DENIED, "Connect permission is required.")
-        }
-
-        val profile = hidDevice ?: return Result.success(Unit)
-        val device = connectedDevice ?: return Result.success(Unit)
-
-        @SuppressLint("MissingPermission")
-        val submitted = profile.disconnect(device)
-        if (!submitted) {
-            return errorResult(ErrorCode.CONNECTION_FAILED, "Disconnect request failed.")
-        }
-
-        logger.log("Disconnect requested for ${device.address}")
-        _activeModifiers.value = emptySet()
-        _pressedMouseButtons.value = emptySet()
-        return Result.success(Unit)
     }
 
     @SuppressLint("MissingPermission")
-    override fun send(action: KeyAction): Result<Unit> {
-        if (!hasConnectPermission()) {
-            return nonStateFailure(ErrorCode.PERMISSION_DENIED, "Connect permission is required.")
-        }
-        if (connectedDevice == null) {
-            return nonStateFailure(
-                ErrorCode.CONNECTION_FAILED,
-                "No connected host device. Connect a device first.",
-            )
-        }
-
-        if (action is KeyAction.ModifierToggle) {
-            val updated = _activeModifiers.value.toMutableSet()
-            if (action.enabled) {
-                updated += action.key
-            } else {
-                updated -= action.key
-            }
-            _activeModifiers.value = updated
-            return sendModifierOnlyReport()
-        }
-
-        val encoded = encoder.encode(action, _activeModifiers.value)
-        if (encoded.unmappedCount > 0) {
-            _unsupportedCharCount.value += encoded.unmappedCount
-            logger.log("Skipped ${encoded.unmappedCount} unmapped characters")
-        }
-
-        return sendReportsNonState(encoded.reports)
-    }
-
-    fun sendPointerMove(
-        dxPx: Float,
-        dyPx: Float,
-        sensitivity: Float,
-    ): Result<Unit> {
-        val dx = (dxPx * sensitivity).roundToInt()
-        val dy = (dyPx * sensitivity).roundToInt()
-        if (dx == 0 && dy == 0) {
-            return Result.success(Unit)
-        }
-        val reports = encoder.encodeMouseMove(
-            dx = dx,
-            dy = dy,
-            buttonsMask = mouseButtonsMask(),
-        )
-        return sendReportsNonState(reports)
-    }
-
-    fun sendVerticalScroll(steps: Int): Result<Unit> {
-        if (steps == 0) {
-            return Result.success(Unit)
-        }
-        val reports = encoder.encodeMouseScroll(
-            wheel = steps,
-            buttonsMask = mouseButtonsMask(),
-        )
-        return sendReportsNonState(reports)
-    }
-
-    fun sendHorizontalScroll(steps: Int): Result<Unit> {
-        if (steps == 0) {
-            return Result.success(Unit)
-        }
-        return sendMouseScrollWithTemporaryModifiers(
-            steps = steps,
-            requiredModifiers = setOf(ModifierKey.SHIFT),
-        )
-    }
-
-    fun sendZoom(zoomIn: Boolean): Result<Unit> {
-        val wheelSteps = if (zoomIn) 1 else -1
-        return sendMouseScrollWithTemporaryModifiers(
-            steps = wheelSteps,
-            requiredModifiers = setOf(ModifierKey.CTRL),
-        )
-    }
-
-    fun setMouseButton(button: MouseButton, pressed: Boolean): Result<Unit> {
-        val current = _pressedMouseButtons.value
-        if ((button in current) == pressed) {
-            return Result.success(Unit)
-        }
-        val updated = current.toMutableSet().apply {
-            if (pressed) {
-                add(button)
-            } else {
-                remove(button)
-            }
-        }.toSet()
-        _pressedMouseButtons.value = updated
-        val sendResult = sendReportsNonState(listOf(encoder.mouseStateReport(mouseButtonsMask(updated))))
-        if (sendResult.isFailure) {
-            _pressedMouseButtons.value = current
-        }
-        return sendResult
-    }
-
-    fun clickMouseButton(button: MouseButton): Result<Unit> {
-        if (button in _pressedMouseButtons.value) {
-            return Result.success(Unit)
-        }
-        setMouseButton(button, pressed = true).getOrElse { return Result.failure(it) }
-        return setMouseButton(button, pressed = false)
-    }
-
-    fun doubleClickMouseButton(button: MouseButton): Result<Unit> {
-        clickMouseButton(button).getOrElse { return Result.failure(it) }
-        return clickMouseButton(button)
-    }
-
-    fun shortcutTaskView(): Result<Unit> {
-        return sendKeyboardShortcut(
-            usage = KEY_USAGE_TAB,
-            modifiers = setOf(ModifierKey.META),
-        )
-    }
-
-    fun shortcutShowDesktop(): Result<Unit> {
-        return sendKeyboardShortcut(
-            usage = KEY_USAGE_D,
-            modifiers = setOf(ModifierKey.META),
-        )
-    }
-
-    fun shortcutSwitchApp(next: Boolean): Result<Unit> {
-        val modifiers = if (next) {
-            setOf(ModifierKey.ALT)
-        } else {
-            setOf(ModifierKey.ALT, ModifierKey.SHIFT)
-        }
-        return sendKeyboardShortcut(
-            usage = KEY_USAGE_TAB,
-            modifiers = modifiers,
-        )
-    }
-
-    fun shortcutLookup(): Result<Unit> {
-        return sendKeyboardShortcut(
-            usage = KEY_USAGE_F,
-            modifiers = setOf(ModifierKey.CTRL),
-        )
-    }
-
-    fun acknowledgeHidDescriptorMigration() {
-        _acknowledgedDescriptorVersionOverride.value = CURRENT_HID_DESCRIPTOR_VERSION
-        scope.launch {
-            settingsStore.updateAcknowledgedHidDescriptorVersion(CURRENT_HID_DESCRIPTOR_VERSION)
-            logger.log("HID descriptor migration acknowledged")
-        }
-    }
-
-    fun forgetTrustedDevice(address: String) {
-        scope.launch {
-            deviceStore.removeTrusted(address)
-            refreshTrustedDevices()
-            logger.log("Trusted device removed: $address")
-        }
-    }
-
-    fun clearTrustedDevices() {
-        scope.launch {
-            deviceStore.clearAll()
-            refreshTrustedDevices()
-            logger.log("Cleared all trusted devices")
-        }
-    }
-
-    fun updateAutoReconnect(enabled: Boolean) {
-        scope.launch {
-            settingsStore.updateAutoReconnect(enabled)
-            logger.log("Auto reconnect set to $enabled")
-        }
-    }
-
-    fun updateForegroundPersistence(enabled: Boolean) {
-        scope.launch {
-            settingsStore.updateForegroundPersistence(enabled)
-            logger.log("Foreground persistence set to $enabled")
-        }
-    }
-
-    fun updatePointerSensitivity(value: Float) {
-        val clamped = value.coerceIn(0.5f, 2.0f)
-        scope.launch {
-            settingsStore.updatePointerSensitivity(clamped)
-            logger.log("Pointer sensitivity set to $clamped")
-        }
-    }
-
-    fun attemptAutoReconnect() {
-        scope.launch(Dispatchers.IO) {
-            if (requiresHostRepairNow()) {
-                logger.log("Auto reconnect skipped: host re-pair required after descriptor update")
-                return@launch
-            }
-            val settings = settings.value
-            if (!settings.autoReconnect) {
-                logger.log("Auto reconnect disabled")
-                return@launch
-            }
-            val last = deviceStore.getLastConnected() ?: return@launch
-            val adapter = bluetoothAdapter ?: return@launch
-            if (!hasConnectPermission()) {
-                logger.log("Auto reconnect skipped: missing connect permission")
-                return@launch
-            }
-            runCatching {
-                val remote = adapter.getRemoteDevice(last)
-                @SuppressLint("MissingPermission")
-                val bonded = remote.bondState == BluetoothDevice.BOND_BONDED
-                if (!bonded) {
-                    logger.log("Auto reconnect skipped: last device is not bonded")
-                    return@runCatching
-                }
-                connect(remote.toHostDevice(connected = false))
-            }.onFailure {
-                logger.log("Auto reconnect failed: ${it.message}")
-            }
-        }
-    }
-
-    fun clearUnsupportedCount() {
-        _unsupportedCharCount.value = 0
-    }
-
-    fun refreshKnownDevices() {
-        refreshBondedDevices()
-        scope.launch { refreshTrustedDevices() }
-    }
-
-    @SuppressLint("MissingPermission")
-    private fun refreshBondedDevices() {
+    private fun refreshBondedDevicesInternal() {
         if (!hasConnectPermission()) {
             _bondedDevices.value = emptyList()
             return
@@ -735,10 +784,8 @@ class BluetoothHidController(
         _discoveredDevices.value = (current + host).sortedBy { it.name.lowercase() }
     }
 
-    private fun ensureProfileProxy(timeoutSeconds: Long = 8): BluetoothHidDevice? {
-        if (hidDevice != null) {
-            return hidDevice
-        }
+    private suspend fun ensureProfileProxy(timeoutMs: Long = PROFILE_PROXY_TIMEOUT_MS): BluetoothHidDevice? {
+        hidDevice?.let { return it }
 
         val adapter = bluetoothAdapter ?: run {
             lastProfileProxyErrorCode = ErrorCode.BLUETOOTH_UNAVAILABLE
@@ -756,56 +803,105 @@ class BluetoothHidController(
             return null
         }
 
-        var proxy: BluetoothHidDevice? = null
-        val latch = CountDownLatch(1)
-
-        @SuppressLint("MissingPermission")
-        val requested = adapter.getProfileProxy(
-            context,
-            object : BluetoothProfile.ServiceListener {
-                override fun onServiceConnected(profile: Int, service: BluetoothProfile) {
-                    if (profile == BluetoothProfile.HID_DEVICE) {
-                        proxy = service as? BluetoothHidDevice
-                        hidDevice = proxy
-                    }
-                    latch.countDown()
-                }
-
-                override fun onServiceDisconnected(profile: Int) {
-                    if (profile == BluetoothProfile.HID_DEVICE) {
-                        hidDevice = null
-                        appRegistered.set(false)
-                        connectedDevice = null
-                        _activeModifiers.value = emptySet()
-                        _pressedMouseButtons.value = emptySet()
-                        _state.value = ConnectionState.Error(
-                            code = ErrorCode.PROFILE_UNAVAILABLE,
-                            message = "Bluetooth HID profile disconnected unexpectedly.",
-                        )
-                    }
-                }
-            },
-            BluetoothProfile.HID_DEVICE,
-        )
-
-        if (!requested) {
-            lastProfileProxyErrorCode = ErrorCode.HID_UNSUPPORTED
-            lastProfileProxyErrorMessage =
-                "This phone does not expose Bluetooth HID Device profile. Try a different device/ROM."
+        profileCircuitBreaker.failFastMessage()?.let { message ->
+            lastProfileProxyErrorCode = ErrorCode.PROFILE_UNAVAILABLE
+            lastProfileProxyErrorMessage = message
+            _hidCapability.value = HidCapability.UNAVAILABLE
+            logger.log("Warn(${ErrorCode.PROFILE_UNAVAILABLE}): $message")
             return null
         }
 
-        val callbackArrived = latch.await(timeoutSeconds, TimeUnit.SECONDS)
-        if (proxy == null) {
-            lastProfileProxyErrorCode = ErrorCode.PROFILE_UNAVAILABLE
-            lastProfileProxyErrorMessage =
-                if (!callbackArrived) {
-                    "Timed out waiting for HID profile service. Retry once after toggling Bluetooth."
-                } else {
-                    "Unable to acquire HID profile proxy. If this persists, your device likely does not support HID Device mode."
+        return profileProxyMutex.withLock {
+            hidDevice?.let { return@withLock it }
+
+            val startedAt = SystemClock.elapsedRealtime()
+            val proxy = try {
+                withTimeout(timeoutMs) {
+                    requestProfileProxy(adapter)
                 }
+            } catch (_: TimeoutCancellationException) {
+                val message = "Timed out waiting for HID profile service. Retry once after toggling Bluetooth."
+                handleProfileProxyFailure(message = message, elapsedMs = SystemClock.elapsedRealtime() - startedAt)
+                return@withLock null
+            } catch (_: ProfileProxyUnsupportedException) {
+                val message = "This phone does not expose Bluetooth HID Device profile. Try a different device/ROM."
+                lastProfileProxyErrorCode = ErrorCode.HID_UNSUPPORTED
+                lastProfileProxyErrorMessage = message
+                _hidCapability.value = HidCapability.UNAVAILABLE
+                profileCircuitBreaker.recordFailure()
+                logger.log("HID profile unsupported: $message")
+                return@withLock null
+            } catch (throwable: Throwable) {
+                val message = "Unable to acquire HID profile proxy: ${throwable.message}"
+                handleProfileProxyFailure(message = message, elapsedMs = SystemClock.elapsedRealtime() - startedAt)
+                return@withLock null
+            }
+
+            if (proxy == null) {
+                val message = "Unable to acquire HID profile proxy. If this persists, your device likely does not support HID Device mode."
+                handleProfileProxyFailure(message = message, elapsedMs = SystemClock.elapsedRealtime() - startedAt)
+                return@withLock null
+            }
+
+            hidDevice = proxy
+            _hidCapability.value = HidCapability.AVAILABLE
+            profileCircuitBreaker.reset()
+            logger.log("HID profile proxy acquired in ${SystemClock.elapsedRealtime() - startedAt}ms")
+            proxy
         }
-        return proxy
+    }
+
+    @SuppressLint("MissingPermission")
+    private suspend fun requestProfileProxy(adapter: BluetoothAdapter): BluetoothHidDevice? {
+        return suspendCancellableCoroutine { continuation ->
+            val resumed = AtomicBoolean(false)
+
+            fun resumeOnce(proxy: BluetoothHidDevice?) {
+                if (resumed.compareAndSet(false, true) && continuation.isActive) {
+                    continuation.resume(proxy)
+                }
+            }
+
+            fun failOnce(error: Throwable) {
+                if (resumed.compareAndSet(false, true) && continuation.isActive) {
+                    continuation.resumeWithException(error)
+                }
+            }
+
+            val listener = object : BluetoothProfile.ServiceListener {
+                override fun onServiceConnected(profile: Int, service: BluetoothProfile) {
+                    if (profile != BluetoothProfile.HID_DEVICE) {
+                        return
+                    }
+                    val proxy = service as? BluetoothHidDevice
+                    hidDevice = proxy
+                    resumeOnce(proxy)
+                }
+
+                override fun onServiceDisconnected(profile: Int) {
+                    if (profile != BluetoothProfile.HID_DEVICE) {
+                        return
+                    }
+                    handleHidServiceDisconnected("Bluetooth HID profile disconnected unexpectedly.")
+                    resumeOnce(null)
+                }
+            }
+
+            val requested = runCatching {
+                adapter.getProfileProxy(
+                    context,
+                    listener,
+                    BluetoothProfile.HID_DEVICE,
+                )
+            }.getOrElse {
+                failOnce(it)
+                return@suspendCancellableCoroutine
+            }
+
+            if (!requested) {
+                failOnce(ProfileProxyUnsupportedException())
+            }
+        }
     }
 
     private fun registerReceivers() {
@@ -831,7 +927,7 @@ class BluetoothHidController(
     }
 
     @SuppressLint("MissingPermission")
-    private fun sendReportsNonState(reports: List<HidReportEncoder.EncodedReport>): Result<Unit> {
+    private suspend fun sendReportsNonState(reports: List<HidReportEncoder.EncodedReport>): Result<Unit> {
         if (reports.isEmpty()) {
             return Result.success(Unit)
         }
@@ -877,7 +973,7 @@ class BluetoothHidController(
         return acknowledged < CURRENT_HID_DESCRIPTOR_VERSION && _trustedDevices.value.isNotEmpty()
     }
 
-    private fun sendModifierOnlyReport(): Result<Unit> {
+    private suspend fun sendModifierOnlyReport(): Result<Unit> {
         val profile = hidDevice ?: return errorResult(ErrorCode.PROFILE_UNAVAILABLE, "HID profile unavailable.")
         val device = connectedDevice ?: return errorResult(ErrorCode.CONNECTION_FAILED, "No connected host device.")
         val report = byteArrayOf(
@@ -900,7 +996,7 @@ class BluetoothHidController(
         }
     }
 
-    private fun sendMouseScrollWithTemporaryModifiers(
+    private suspend fun sendMouseScrollWithTemporaryModifiers(
         steps: Int,
         requiredModifiers: Set<ModifierKey>,
     ): Result<Unit> {
@@ -926,7 +1022,7 @@ class BluetoothHidController(
         return sendReportsNonState(reports)
     }
 
-    private fun sendKeyboardShortcut(
+    private suspend fun sendKeyboardShortcut(
         usage: Int,
         modifiers: Set<ModifierKey>,
     ): Result<Unit> {
@@ -956,6 +1052,79 @@ class BluetoothHidController(
             _state.value = ConnectionState.Idle
         }
         return Result.failure(IllegalStateException(message))
+    }
+
+    private fun refreshBondedDevicesAsync() {
+        scope.launch(commandDispatcher) {
+            refreshBondedDevicesInternal()
+        }
+    }
+
+    private fun onBluetoothTurnedOff() {
+        appRegistered.set(false)
+        connectedDevice = null
+        hidDevice = null
+        _hidCapability.value = HidCapability.UNKNOWN
+        profileCircuitBreaker.reset()
+        _state.value = ConnectionState.Error(
+            code = ErrorCode.BLUETOOTH_DISABLED,
+            message = "Bluetooth is off. Enable Bluetooth and retry.",
+        )
+    }
+
+    private fun onBluetoothTurnedOn() {
+        hidDevice = null
+        _hidCapability.value = HidCapability.UNKNOWN
+        profileCircuitBreaker.reset()
+        logger.log("Bluetooth enabled, reset HID capability cache")
+    }
+
+    private fun handleProfileProxyFailure(
+        message: String,
+        elapsedMs: Long,
+    ) {
+        lastProfileProxyErrorCode = ErrorCode.PROFILE_UNAVAILABLE
+        lastProfileProxyErrorMessage = message
+        _hidCapability.value = HidCapability.UNAVAILABLE
+        val breakerActivated = profileCircuitBreaker.recordFailure()
+        logger.log("HID profile acquisition failed in ${elapsedMs}ms: $message")
+        if (breakerActivated) {
+            logger.log("HID profile circuit breaker active for ${PROFILE_FAILURE_COOLDOWN_MS}ms")
+        }
+    }
+
+    private fun handleHidServiceDisconnected(message: String) {
+        hidDevice = null
+        appRegistered.set(false)
+        connectedDevice = null
+        _activeModifiers.value = emptySet()
+        _pressedMouseButtons.value = emptySet()
+        _hidCapability.value = HidCapability.UNAVAILABLE
+        _state.value = ConnectionState.Error(
+            code = ErrorCode.PROFILE_UNAVAILABLE,
+            message = message,
+        )
+    }
+
+    private fun updatePointerQueueStats(
+        sourceSamples: Int,
+        reportsSent: Int,
+    ) {
+        pointerSampleCount += sourceSamples.toLong().coerceAtLeast(1)
+        pointerBatchCount += 1
+        pointerReportCount += reportsSent.toLong().coerceAtLeast(0)
+
+        if (pointerBatchCount % POINTER_STATS_LOG_EVERY == 0L) {
+            val avgSamplesPerBatch = if (pointerBatchCount == 0L) {
+                0.0
+            } else {
+                pointerSampleCount.toDouble() / pointerBatchCount.toDouble()
+            }
+            logger.log(
+                "Pointer queue stats: batches=$pointerBatchCount samples=$pointerSampleCount " +
+                    "reports=$pointerReportCount avgSamplesPerBatch=${"%.2f".format(avgSamplesPerBatch)}",
+            )
+        }
     }
 
     @SuppressLint("MissingPermission")
@@ -994,6 +1163,8 @@ class BluetoothHidController(
         return runCatching { manager.isLocationEnabled }.getOrDefault(true)
     }
 
+    private class ProfileProxyUnsupportedException : IllegalStateException()
+
     companion object {
         const val CURRENT_HID_DESCRIPTOR_VERSION = 2
         const val REPAIR_REQUIRED_MESSAGE =
@@ -1001,5 +1172,10 @@ class BluetoothHidController(
         private const val KEY_USAGE_TAB = 0x2B
         private const val KEY_USAGE_D = 0x07
         private const val KEY_USAGE_F = 0x09
+
+        private const val PROFILE_PROXY_TIMEOUT_MS = 8_000L
+        private const val PROFILE_FAILURE_THRESHOLD = 2
+        private const val PROFILE_FAILURE_COOLDOWN_MS = 30_000L
+        private const val POINTER_STATS_LOG_EVERY = 120L
     }
 }

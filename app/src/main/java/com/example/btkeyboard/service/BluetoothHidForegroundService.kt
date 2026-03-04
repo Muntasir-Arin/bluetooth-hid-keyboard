@@ -5,7 +5,6 @@ import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.Service
 import android.content.Intent
-import android.os.Build
 import android.os.IBinder
 import androidx.core.app.NotificationCompat
 import com.example.btkeyboard.R
@@ -18,11 +17,13 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withTimeoutOrNull
 
 class BluetoothHidForegroundService : Service() {
 
     private val serviceScope: CoroutineScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
     private var notificationJob: Job? = null
+    private var startupJob: Job? = null
 
     private val app by lazy { application as BtKeyboardApplication }
     private val controller by lazy { app.hidController }
@@ -40,11 +41,15 @@ class BluetoothHidForegroundService : Service() {
             return
         }
 
-        runCatching {
+        startupJob = serviceScope.launch {
             controller.registerApp()
-            controller.attemptAutoReconnect()
-        }.onFailure {
-            app.diagnosticsLogger.log("HID initialization failed: ${it.message}")
+                .exceptionOrNull()
+                ?.let { app.diagnosticsLogger.log("HID initialization failed: ${it.message}") }
+            runCatching {
+                controller.attemptAutoReconnect()
+            }.onFailure {
+                app.diagnosticsLogger.log("Auto reconnect failed: ${it.message}")
+            }
         }
 
         notificationJob = serviceScope.launch {
@@ -75,8 +80,14 @@ class BluetoothHidForegroundService : Service() {
 
     override fun onDestroy() {
         notificationJob?.cancel()
-        controller.unregisterApp()
-        serviceScope.cancel()
+        startupJob?.cancel()
+        serviceScope.launch(Dispatchers.IO) {
+            withTimeoutOrNull(SERVICE_SHUTDOWN_TIMEOUT_MS) {
+                controller.unregisterApp()
+            }
+        }.invokeOnCompletion {
+            serviceScope.cancel()
+        }
         super.onDestroy()
     }
 
@@ -107,5 +118,6 @@ class BluetoothHidForegroundService : Service() {
         const val CHANNEL_ID = "bt_keyboard_service"
         const val NOTIFICATION_ID = 2001
         const val ACTION_STOP = "com.example.btkeyboard.action.STOP_SERVICE"
+        private const val SERVICE_SHUTDOWN_TIMEOUT_MS = 2_000L
     }
 }

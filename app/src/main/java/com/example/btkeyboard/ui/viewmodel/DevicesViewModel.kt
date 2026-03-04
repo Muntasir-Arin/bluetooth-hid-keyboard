@@ -1,8 +1,13 @@
 package com.example.btkeyboard.ui.viewmodel
 
 import androidx.lifecycle.ViewModel
+import androidx.lifecycle.viewModelScope
 import com.example.btkeyboard.bluetooth.BluetoothHidController
 import com.example.btkeyboard.model.HostDevice
+import kotlinx.coroutines.flow.MutableSharedFlow
+import kotlinx.coroutines.flow.SharedFlow
+import kotlinx.coroutines.flow.asSharedFlow
+import kotlinx.coroutines.launch
 
 class DevicesViewModel(
     private val controller: BluetoothHidController,
@@ -13,22 +18,56 @@ class DevicesViewModel(
     val bondedDevices = controller.bondedDevices
     val trustedDevices = controller.trustedDevices
     val requiresHostRepair = controller.requiresHostRepair
+    val hidCapability = controller.hidCapability
+
+    private val _events = MutableSharedFlow<String>(extraBufferCapacity = 32)
+    val events: SharedFlow<String> = _events.asSharedFlow()
 
     fun bluetoothEnabled(): Boolean = controller.isBluetoothEnabled()
 
-    fun hidSupported(): Boolean = controller.isHidDeviceSupported()
-
     fun refreshKnownDevices() = controller.refreshKnownDevices()
 
-    fun startDiscovery(): Result<Unit> = controller.startDiscovery()
+    fun startDiscovery() {
+        viewModelScope.launch {
+            controller.startDiscovery()
+                .exceptionOrNull()
+                ?.message
+                ?.let { _events.emit(it) }
+        }
+    }
 
-    fun stopDiscovery() = controller.stopDiscovery()
+    fun stopDiscovery() {
+        viewModelScope.launch {
+            controller.stopDiscovery()
+        }
+    }
 
-    fun pair(device: HostDevice): Result<Unit> = controller.pair(device)
+    fun pair(device: HostDevice) {
+        viewModelScope.launch {
+            controller.pair(device)
+                .exceptionOrNull()
+                ?.message
+                ?.let { _events.emit(it) }
+        }
+    }
 
-    fun connect(device: HostDevice): Result<Unit> = controller.connect(device)
+    fun connect(device: HostDevice) {
+        viewModelScope.launch {
+            controller.connect(device)
+                .exceptionOrNull()
+                ?.message
+                ?.let { _events.emit(it) }
+        }
+    }
 
-    fun disconnect(): Result<Unit> = controller.disconnect()
+    fun disconnect() {
+        viewModelScope.launch {
+            controller.disconnect()
+                .exceptionOrNull()
+                ?.message
+                ?.let { _events.emit(it) }
+        }
+    }
 
     fun forgetTrusted(address: String) = controller.forgetTrustedDevice(address)
 

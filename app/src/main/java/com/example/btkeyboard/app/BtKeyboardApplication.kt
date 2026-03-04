@@ -10,7 +10,7 @@ import kotlinx.coroutines.SupervisorJob
 
 class BtKeyboardApplication : Application() {
 
-    private val appScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
+    private val appScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
 
     val diagnosticsLogger: DiagnosticsLogger by lazy {
         DiagnosticsLogger()

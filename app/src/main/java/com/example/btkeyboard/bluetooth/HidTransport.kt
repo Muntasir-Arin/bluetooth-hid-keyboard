@@ -6,11 +6,11 @@ import com.example.btkeyboard.model.KeyAction
 import kotlinx.coroutines.flow.StateFlow
 
 interface HidTransport {
-    fun registerApp(): Result<Unit>
-    fun unregisterApp(): Result<Unit>
-    fun connect(device: HostDevice): Result<Unit>
-    fun disconnect(): Result<Unit>
-    fun send(action: KeyAction): Result<Unit>
+    suspend fun registerApp(): Result<Unit>
+    suspend fun unregisterApp(): Result<Unit>
+    suspend fun connect(device: HostDevice): Result<Unit>
+    suspend fun disconnect(): Result<Unit>
+    suspend fun send(action: KeyAction): Result<Unit>
 
     val state: StateFlow<ConnectionState>
 }

@@ -1,11 +1,17 @@
 package com.example.btkeyboard.ui.viewmodel
 
 import androidx.lifecycle.ViewModel
+import androidx.lifecycle.viewModelScope
 import com.example.btkeyboard.bluetooth.BluetoothHidController
+import com.example.btkeyboard.input.PointerMoveCoalescer
 import com.example.btkeyboard.model.MouseButton
-import kotlinx.coroutines.flow.MutableStateFlow
-import kotlinx.coroutines.flow.StateFlow
-import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.MutableSharedFlow
+import kotlinx.coroutines.flow.SharedFlow
+import kotlinx.coroutines.flow.asSharedFlow
+import kotlinx.coroutines.isActive
+import kotlinx.coroutines.launch
 
 class TrackpadViewModel(
     private val controller: BluetoothHidController,
@@ -14,108 +20,157 @@ class TrackpadViewModel(
     val connectionState = controller.state
     val pressedMouseButtons = controller.pressedMouseButtons
 
-    private val _lastError = MutableStateFlow<String?>(null)
-    val lastError: StateFlow<String?> = _lastError.asStateFlow()
+    private val pointerMoves = Channel<PointerMoveCommand>(capacity = Channel.UNLIMITED)
+
+    private val _events = MutableSharedFlow<String>(extraBufferCapacity = 64)
+    val events: SharedFlow<String> = _events.asSharedFlow()
+
+    init {
+        viewModelScope.launch {
+            processPointerMoves()
+        }
+    }
 
     fun movePointer(
         dx: Float,
         dy: Float,
         sensitivity: Float,
     ) {
-        controller.sendPointerMove(dxPx = dx, dyPx = dy, sensitivity = sensitivity)
-            .exceptionOrNull()
-            ?.message
-            ?.let { _lastError.value = it }
+        val queued = pointerMoves.trySend(PointerMoveCommand(dx = dx, dy = dy, sensitivity = sensitivity))
+        if (queued.isFailure) {
+            _events.tryEmit("Trackpad input queue is busy. Please retry.")
+        }
     }
 
     fun scrollBySteps(steps: Int) {
-        controller.sendVerticalScroll(steps)
-            .exceptionOrNull()
-            ?.message
-            ?.let { _lastError.value = it }
+        launchCommand {
+            controller.sendVerticalScroll(steps)
+        }
     }
 
     fun scrollHorizontallyBySteps(steps: Int) {
-        controller.sendHorizontalScroll(steps)
-            .exceptionOrNull()
-            ?.message
-            ?.let { _lastError.value = it }
+        launchCommand {
+            controller.sendHorizontalScroll(steps)
+        }
     }
 
     fun setButtonPressed(
         button: MouseButton,
         pressed: Boolean,
     ) {
-        controller.setMouseButton(button, pressed)
-            .exceptionOrNull()
-            ?.message
-            ?.let { _lastError.value = it }
+        launchCommand {
+            controller.setMouseButton(button, pressed)
+        }
     }
 
     fun tapToClick() {
-        controller.clickMouseButton(MouseButton.LEFT)
-            .exceptionOrNull()
-            ?.message
-            ?.let { _lastError.value = it }
+        launchCommand {
+            controller.clickMouseButton(MouseButton.LEFT)
+        }
     }
 
     fun doubleTapToDoubleClick() {
-        controller.doubleClickMouseButton(MouseButton.LEFT)
-            .exceptionOrNull()
-            ?.message
-            ?.let { _lastError.value = it }
+        launchCommand {
+            controller.doubleClickMouseButton(MouseButton.LEFT)
+        }
     }
 
     fun twoFingerTapRightClick() {
-        controller.clickMouseButton(MouseButton.RIGHT)
-            .exceptionOrNull()
-            ?.message
-            ?.let { _lastError.value = it }
+        launchCommand {
+            controller.clickMouseButton(MouseButton.RIGHT)
+        }
     }
 
     fun pinchZoom(zoomIn: Boolean) {
-        controller.sendZoom(zoomIn)
-            .exceptionOrNull()
-            ?.message
-            ?.let { _lastError.value = it }
+        launchCommand {
+            controller.sendZoom(zoomIn)
+        }
     }
 
     fun threeFingerSwipeUp() {
-        controller.shortcutTaskView()
-            .exceptionOrNull()
-            ?.message
-            ?.let { _lastError.value = it }
+        launchCommand {
+            controller.shortcutTaskView()
+        }
     }
 
     fun threeFingerSwipeDown() {
-        controller.shortcutShowDesktop()
-            .exceptionOrNull()
-            ?.message
-            ?.let { _lastError.value = it }
+        launchCommand {
+            controller.shortcutShowDesktop()
+        }
     }
 
     fun threeFingerSwipeLeft() {
-        controller.shortcutSwitchApp(next = false)
-            .exceptionOrNull()
-            ?.message
-            ?.let { _lastError.value = it }
+        launchCommand {
+            controller.shortcutSwitchApp(next = false)
+        }
     }
 
     fun threeFingerSwipeRight() {
-        controller.shortcutSwitchApp(next = true)
-            .exceptionOrNull()
-            ?.message
-            ?.let { _lastError.value = it }
+        launchCommand {
+            controller.shortcutSwitchApp(next = true)
+        }
     }
 
     fun threeFingerTapLookup() {
-        controller.shortcutLookup()
-            .exceptionOrNull()
-            ?.message
-            ?.let { _lastError.value = it }
+        launchCommand {
+            controller.shortcutLookup()
+        }
     }
 
-    fun clearError() {
-        _lastError.value = null
+    override fun onCleared() {
+        pointerMoves.close()
+        super.onCleared()
+    }
+
+    private suspend fun processPointerMoves() {
+        val coalescer = PointerMoveCoalescer()
+        while (viewModelScope.isActive) {
+            val first = pointerMoves.receiveCatching().getOrNull() ?: break
+            coalescer.add(
+                dx = first.dx,
+                dy = first.dy,
+                sensitivity = first.sensitivity,
+            )
+
+            delay(POINTER_FLUSH_INTERVAL_MS)
+
+            while (true) {
+                val next = pointerMoves.tryReceive().getOrNull() ?: break
+                coalescer.add(
+                    dx = next.dx,
+                    dy = next.dy,
+                    sensitivity = next.sensitivity,
+                )
+            }
+
+            val batch = coalescer.drain() ?: continue
+            controller.sendPointerMove(
+                dxPx = batch.dx,
+                dyPx = batch.dy,
+                sensitivity = batch.sensitivity,
+                sourceSamples = batch.samples,
+            ).exceptionOrNull()
+                ?.message
+                ?.let { _events.emit(it) }
+        }
+    }
+
+    private fun launchCommand(block: suspend () -> Result<Unit>) {
+        viewModelScope.launch {
+            block()
+                .exceptionOrNull()
+                ?.message
+                ?.let { _events.emit(it) }
+        }
+    }
+
+    private data class PointerMoveCommand(
+        val dx: Float,
+        val dy: Float,
+        val sensitivity: Float,
+    )
+
+    companion object {
+        private const val POINTER_FLUSH_INTERVAL_MS = 8L
     }
 }

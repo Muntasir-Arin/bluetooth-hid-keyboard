@@ -4,14 +4,17 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.lifecycle.ViewModel
+import androidx.lifecycle.viewModelScope
 import com.example.btkeyboard.bluetooth.BluetoothHidController
 import com.example.btkeyboard.input.TextInputProcessor
 import com.example.btkeyboard.model.KeyAction
 import com.example.btkeyboard.model.ModifierKey
 import com.example.btkeyboard.model.SpecialKey
-import kotlinx.coroutines.flow.MutableStateFlow
-import kotlinx.coroutines.flow.StateFlow
-import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.flow.MutableSharedFlow
+import kotlinx.coroutines.flow.SharedFlow
+import kotlinx.coroutines.flow.asSharedFlow
+import kotlinx.coroutines.launch
 
 class KeyboardViewModel(
     private val controller: BluetoothHidController,
@@ -25,16 +28,29 @@ class KeyboardViewModel(
     val unsupportedCharCount = controller.unsupportedCharCount
 
     private val processor = TextInputProcessor()
-    private val _lastError = MutableStateFlow<String?>(null)
-    val lastError: StateFlow<String?> = _lastError.asStateFlow()
+    private val actionsChannel = Channel<KeyAction>(capacity = Channel.UNLIMITED)
+
+    private val _events = MutableSharedFlow<String>(extraBufferCapacity = 64)
+    val events: SharedFlow<String> = _events.asSharedFlow()
+
+    init {
+        viewModelScope.launch {
+            for (action in actionsChannel) {
+                controller.send(action)
+                    .exceptionOrNull()
+                    ?.message
+                    ?.let { _events.emit(it) }
+            }
+        }
+    }
 
     fun onInputTextChanged(newText: String) {
         inputText = newText
         val actions = processor.process(newText)
         actions.forEach { action ->
-            val result = controller.send(action)
-            result.exceptionOrNull()?.let { err ->
-                _lastError.value = err.message
+            val queued = actionsChannel.trySend(action)
+            if (queued.isFailure) {
+                _events.tryEmit("Keyboard input queue is busy. Please retry.")
             }
         }
 
@@ -45,21 +61,17 @@ class KeyboardViewModel(
     }
 
     fun sendSpecial(key: SpecialKey) {
-        val result = controller.send(KeyAction.Special(key))
-        result.exceptionOrNull()?.let { err ->
-            _lastError.value = err.message
+        val queued = actionsChannel.trySend(KeyAction.Special(key))
+        if (queued.isFailure) {
+            _events.tryEmit("Keyboard input queue is busy. Please retry.")
         }
     }
 
     fun toggleModifier(key: ModifierKey, enabled: Boolean) {
-        val result = controller.send(KeyAction.ModifierToggle(key, enabled))
-        result.exceptionOrNull()?.let { err ->
-            _lastError.value = err.message
+        val queued = actionsChannel.trySend(KeyAction.ModifierToggle(key, enabled))
+        if (queued.isFailure) {
+            _events.tryEmit("Keyboard input queue is busy. Please retry.")
         }
-    }
-
-    fun clearError() {
-        _lastError.value = null
     }
 
     fun clearUnsupportedCount() {
@@ -69,6 +81,11 @@ class KeyboardViewModel(
     fun clearInput() {
         inputText = ""
         processor.reset()
+    }
+
+    override fun onCleared() {
+        actionsChannel.close()
+        super.onCleared()
     }
 
     companion object {

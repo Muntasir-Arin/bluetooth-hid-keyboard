@@ -20,6 +20,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.example.btkeyboard.model.ConnectionState
 import com.example.btkeyboard.model.HostDevice
+import com.example.btkeyboard.model.HidCapability
 import com.example.btkeyboard.ui.components.AppCard
 import com.example.btkeyboard.ui.components.SectionTitle
 import com.example.btkeyboard.ui.components.shortLabel
@@ -29,7 +30,7 @@ import com.example.btkeyboard.ui.theme.UiTokens
 @Composable
 fun DevicesScreen(
     bluetoothEnabled: Boolean,
-    hidSupported: Boolean,
+    hidCapability: HidCapability,
     connectionState: ConnectionState,
     trustedDevices: List<HostDevice>,
     bondedDevices: List<HostDevice>,
@@ -63,7 +64,7 @@ fun DevicesScreen(
                 ) {
                     Text("Connection", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
                     Text("Bluetooth: ${if (bluetoothEnabled) "ON" else "OFF"}")
-                    Text("HID support: ${if (hidSupported) "Available" else "Unavailable"}")
+                    Text("HID capability: ${hidCapability.label()}")
                     Text("State: ${connectionState.shortLabel()}")
                     FlowRow(
                         horizontalArrangement = Arrangement.spacedBy(8.dp),
@@ -90,9 +91,9 @@ fun DevicesScreen(
                             }
                         }
                     }
-                    if (!hidSupported) {
+                    if (hidCapability == HidCapability.UNAVAILABLE) {
                         Text(
-                            text = "This phone may not expose Bluetooth HID Device mode.",
+                            text = "This phone/ROM may not expose Bluetooth HID Device mode reliably.",
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
@@ -183,6 +184,14 @@ fun DevicesScreen(
                 )
             }
         }
+    }
+}
+
+private fun HidCapability.label(): String {
+    return when (this) {
+        HidCapability.UNKNOWN -> "Checking"
+        HidCapability.AVAILABLE -> "Available"
+        HidCapability.UNAVAILABLE -> "Unavailable"
     }
 }
 

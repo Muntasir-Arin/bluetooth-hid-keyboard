@@ -97,13 +97,12 @@ class MainActivity : ComponentActivity() {
             val bondedDevices by devicesViewModel.bondedDevices.collectAsStateWithLifecycle()
             val trustedDevices by devicesViewModel.trustedDevices.collectAsStateWithLifecycle()
             val requiresHostRepair by devicesViewModel.requiresHostRepair.collectAsStateWithLifecycle()
+            val hidCapability by devicesViewModel.hidCapability.collectAsStateWithLifecycle()
             val activeModifiers by keyboardViewModel.activeModifiers.collectAsStateWithLifecycle()
             val unsupportedCount by keyboardViewModel.unsupportedCharCount.collectAsStateWithLifecycle()
             val pressedButtons by trackpadViewModel.pressedMouseButtons.collectAsStateWithLifecycle()
             val settings by settingsViewModel.settings.collectAsStateWithLifecycle()
             val diagnostics by settingsViewModel.diagnostics.collectAsStateWithLifecycle()
-            val keyboardError by keyboardViewModel.lastError.collectAsStateWithLifecycle()
-            val trackpadError by trackpadViewModel.lastError.collectAsStateWithLifecycle()
 
             foregroundPersistenceEnabled = settings.foregroundPersistence
 
@@ -119,16 +118,22 @@ class MainActivity : ComponentActivity() {
                 selectedRoute = currentRoute
             }
 
-            LaunchedEffect(keyboardError) {
-                val message = keyboardError ?: return@LaunchedEffect
-                toast(message)
-                keyboardViewModel.clearError()
+            LaunchedEffect(Unit) {
+                devicesViewModel.events.collect { message ->
+                    toast(message)
+                }
             }
 
-            LaunchedEffect(trackpadError) {
-                val message = trackpadError ?: return@LaunchedEffect
-                toast(message)
-                trackpadViewModel.clearError()
+            LaunchedEffect(Unit) {
+                keyboardViewModel.events.collect { message ->
+                    toast(message)
+                }
+            }
+
+            LaunchedEffect(Unit) {
+                trackpadViewModel.events.collect { message ->
+                    toast(message)
+                }
             }
 
             BtKeyboardTheme {
@@ -145,9 +150,6 @@ class MainActivity : ComponentActivity() {
                             pendingRepairConnect?.let { device ->
                                 withPermissions(BluetoothPermissionHelper.connectPermissions()) {
                                     devicesViewModel.connect(device)
-                                        .exceptionOrNull()
-                                        ?.message
-                                        ?.let(::toast)
                                 }
                             }
                             pendingRepairConnect = null
@@ -198,7 +200,7 @@ class MainActivity : ComponentActivity() {
                             }
                             DevicesScreen(
                                 bluetoothEnabled = devicesViewModel.bluetoothEnabled(),
-                                hidSupported = devicesViewModel.hidSupported(),
+                                hidCapability = hidCapability,
                                 connectionState = connectionState,
                                 trustedDevices = trustedDevices,
                                 bondedDevices = bondedDevices,
@@ -207,9 +209,6 @@ class MainActivity : ComponentActivity() {
                                 onStartDiscovery = {
                                     withPermissions(BluetoothPermissionHelper.scanPermissions()) {
                                         devicesViewModel.startDiscovery()
-                                            .exceptionOrNull()
-                                            ?.message
-                                            ?.let(::toast)
                                     }
                                 },
                                 onStopDiscovery = devicesViewModel::stopDiscovery,
@@ -220,9 +219,6 @@ class MainActivity : ComponentActivity() {
                                 onPair = { device ->
                                     withPermissions(BluetoothPermissionHelper.connectPermissions()) {
                                         devicesViewModel.pair(device)
-                                            .exceptionOrNull()
-                                            ?.message
-                                            ?.let(::toast)
                                     }
                                 },
                                 onConnect = { device ->
@@ -232,18 +228,12 @@ class MainActivity : ComponentActivity() {
                                             showRepairDialog = true
                                         } else {
                                             devicesViewModel.connect(device)
-                                                .exceptionOrNull()
-                                                ?.message
-                                                ?.let(::toast)
                                         }
                                     }
                                 },
                                 onDisconnect = {
                                     withPermissions(BluetoothPermissionHelper.connectPermissions()) {
                                         devicesViewModel.disconnect()
-                                            .exceptionOrNull()
-                                            ?.message
-                                            ?.let(::toast)
                                     }
                                 },
                                 onForgetTrusted = devicesViewModel::forgetTrusted,
