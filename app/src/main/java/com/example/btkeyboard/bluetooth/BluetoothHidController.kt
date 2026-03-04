@@ -62,6 +62,11 @@ class BluetoothHidController(
         nowProvider = { SystemClock.elapsedRealtime() },
     )
     private val registrationReconciler = RegistrationSubmissionReconciler()
+    private val discoveryStartReconciler = DiscoveryStartReconciler()
+    private val discoveryFailureLimiter = DiscoveryFailureLogLimiter(
+        dedupeWindowMs = DISCOVERY_FAILURE_DEDUPE_WINDOW_MS,
+        nowProvider = { SystemClock.elapsedRealtime() },
+    )
 
     private val bluetoothAdapter: BluetoothAdapter? =
         context.getSystemService(BluetoothManager::class.java)?.adapter
@@ -81,6 +86,9 @@ class BluetoothHidController(
 
     @Volatile
     private var connectedDevice: BluetoothDevice? = null
+
+    @Volatile
+    private var lastDiscoveryStartedSignalAtMs: Long = 0L
 
     private val appRegistered = AtomicBoolean(false)
     private var lastProfileProxyErrorCode: ErrorCode = ErrorCode.PROFILE_UNAVAILABLE
@@ -202,6 +210,12 @@ class BluetoothHidController(
                     }
                 }
 
+                BluetoothAdapter.ACTION_DISCOVERY_STARTED -> {
+                    lastDiscoveryStartedSignalAtMs = SystemClock.elapsedRealtime()
+                    logger.log("Bluetooth discovery started")
+                    _state.value = ConnectionState.Discovering
+                }
+
                 BluetoothDevice.ACTION_BOND_STATE_CHANGED -> {
                     refreshBondedDevicesAsync()
                 }
@@ -245,18 +259,19 @@ class BluetoothHidController(
             "Bluetooth adapter is unavailable.",
         )
         if (!hasScanPermission()) {
-            return@withContext discoveryFailure("Scan permission is required.")
+            return@withContext discoveryFailure("Scan permission is required.", adapter)
         }
         if (!adapter.isEnabled) {
             return@withContext errorResult(ErrorCode.BLUETOOTH_DISABLED, "Enable Bluetooth first.")
         }
         DiscoveryPolicy.blockedReason(_state.value)?.let { blockedReason ->
-            return@withContext discoveryFailure(blockedReason)
+            return@withContext discoveryFailure(blockedReason, adapter)
         }
         if (!isLocationReadyForClassicDiscovery()) {
             return@withContext discoveryFailure(
                 "Location services must be enabled for discovery on this Android version. " +
                     "Or pair in system settings and use Bonded devices.",
+                adapter,
             )
         }
 
@@ -273,10 +288,26 @@ class BluetoothHidController(
             return@withContext discoveryFailure(
                 "Unable to start discovery: ${it.message}. " +
                     "You can still pair via system Bluetooth settings.",
+                adapter,
             )
         }
 
         if (!started) {
+            val requestStartedAt = SystemClock.elapsedRealtime()
+            val reconciled = discoveryStartReconciler.awaitStartConfirmation(
+                graceMs = DISCOVERY_START_CALLBACK_GRACE_MS,
+            ) {
+                runCatching { adapter.isDiscovering }.getOrDefault(false) ||
+                    lastDiscoveryStartedSignalAtMs >= requestStartedAt
+            }
+            logger.log(
+                "Discovery start reconciliation: submitted=false " +
+                    "callback-confirmed=${reconciled.started} waitMs=${reconciled.waitMs}",
+            )
+            if (reconciled.started) {
+                _state.value = ConnectionState.Discovering
+                return@withContext Result.success(Unit)
+            }
             val hint = when (adapter.state) {
                 BluetoothAdapter.STATE_OFF -> "Bluetooth is off. Enable Bluetooth first."
                 BluetoothAdapter.STATE_TURNING_ON -> "Bluetooth is turning on. Try again in a moment."
@@ -291,7 +322,7 @@ class BluetoothHidController(
                     }
                 }
             }
-            return@withContext discoveryFailure(hint)
+            return@withContext discoveryFailure(hint, adapter)
         }
 
         logger.log("Bluetooth discovery started")
@@ -655,9 +686,7 @@ class BluetoothHidController(
                     "callback-confirmed=${reconciled.callbackConfirmed} waitMs=${reconciled.waitMs}",
             )
             if (reconciled.callbackConfirmed) {
-                logger.log(
-                    "Warn(${ErrorCode.REGISTRATION_FAILED}): registerApp returned false but callback confirmed registration.",
-                )
+                logger.log(BluetoothDiagnosticsTags.registrationReconciledWarning())
                 return Result.success(Unit)
             }
             return errorResult(
@@ -918,6 +947,7 @@ class BluetoothHidController(
     private fun registerReceivers() {
         val filter = IntentFilter().apply {
             addAction(BluetoothDevice.ACTION_FOUND)
+            addAction(BluetoothAdapter.ACTION_DISCOVERY_STARTED)
             addAction(BluetoothAdapter.ACTION_DISCOVERY_FINISHED)
             addAction(BluetoothDevice.ACTION_BOND_STATE_CHANGED)
             addAction(BluetoothAdapter.ACTION_STATE_CHANGED)
@@ -1057,12 +1087,54 @@ class BluetoothHidController(
         return Result.failure(IllegalStateException(message))
     }
 
-    private fun discoveryFailure(message: String): Result<Unit> {
-        logger.log("Warn(${ErrorCode.DISCOVERY_FAILED}): $message")
+    private fun discoveryFailure(
+        message: String,
+        adapter: BluetoothAdapter?,
+    ): Result<Unit> {
+        val snapshot = buildDiscoveryFailureSnapshot(adapter)
+        val fingerprint = "$message|$snapshot"
+        if (discoveryFailureLimiter.shouldLog(fingerprint)) {
+            logger.log("Warn(${ErrorCode.DISCOVERY_FAILED}): $message")
+            logger.log("Discovery failure snapshot: $snapshot")
+        }
         if (_state.value is ConnectionState.Discovering) {
             _state.value = ConnectionState.Idle
         }
         return Result.failure(IllegalStateException(message))
+    }
+
+    private fun buildDiscoveryFailureSnapshot(adapter: BluetoothAdapter?): String {
+        val adapterState = adapter?.let { bluetoothAdapterStateName(it.state) } ?: "NULL"
+        val adapterDiscovering = adapter?.let { runCatching { it.isDiscovering }.getOrDefault(false) } ?: false
+        return "adapterState=$adapterState " +
+            "isDiscovering=$adapterDiscovering " +
+            "scanPerm=${hasScanPermission()} " +
+            "connectPerm=${hasConnectPermission()} " +
+            "locationReady=${isLocationReadyForClassicDiscovery()} " +
+            "connectionState=${_state.value.diagnosticLabel()} " +
+            "appRegistered=${appRegistered.get()} " +
+            "hidCapability=${_hidCapability.value}"
+    }
+
+    private fun bluetoothAdapterStateName(state: Int): String {
+        return when (state) {
+            BluetoothAdapter.STATE_ON -> "ON"
+            BluetoothAdapter.STATE_OFF -> "OFF"
+            BluetoothAdapter.STATE_TURNING_ON -> "TURNING_ON"
+            BluetoothAdapter.STATE_TURNING_OFF -> "TURNING_OFF"
+            else -> "UNKNOWN($state)"
+        }
+    }
+
+    private fun ConnectionState.diagnosticLabel(): String {
+        return when (this) {
+            is ConnectionState.Connected -> "Connected(${device.address})"
+            is ConnectionState.Connecting -> "Connecting(${device.address})"
+            is ConnectionState.Discovering -> "Discovering"
+            is ConnectionState.Pairing -> "Pairing(${device.address})"
+            is ConnectionState.Error -> "Error($code)"
+            ConnectionState.Idle -> "Idle"
+        }
     }
 
     private fun refreshBondedDevicesAsync() {
@@ -1188,6 +1260,8 @@ class BluetoothHidController(
         private const val PROFILE_FAILURE_THRESHOLD = 2
         private const val PROFILE_FAILURE_COOLDOWN_MS = 30_000L
         private const val REGISTRATION_CALLBACK_GRACE_MS = 750L
+        private const val DISCOVERY_START_CALLBACK_GRACE_MS = 400L
+        private const val DISCOVERY_FAILURE_DEDUPE_WINDOW_MS = 10_000L
         private const val POINTER_STATS_LOG_EVERY = 1200L
     }
 }

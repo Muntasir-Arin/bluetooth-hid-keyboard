@@ -203,7 +203,7 @@ class MainActivity : ComponentActivity() {
                                 discoveredDevices = discoveredDevices,
                                 requiresHostRepair = requiresHostRepair,
                                 onStartDiscovery = {
-                                    withServiceForBluetoothAction(BluetoothPermissionHelper.scanPermissions()) {
+                                    withPermissions(BluetoothPermissionHelper.scanPermissions()) {
                                         devicesViewModel.startDiscovery()
                                     }
                                 },
